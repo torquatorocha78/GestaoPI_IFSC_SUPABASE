@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -1494,4 +1494,4 @@ elif pagina == "📄 Gerar Relatórios":
             st.error(
                 f"Erro ao exportar CSV: {exc}"
             )
-```
+
