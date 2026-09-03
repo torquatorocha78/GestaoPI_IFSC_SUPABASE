@@ -1,4 +1,4 @@
-```python
+
 import os
 import unicodedata
 from datetime import date
@@ -1042,4 +1042,4 @@ def salvar_patente_importada(
 def obter_anuidades(
     patente_id: Any
 ) -> pd
-```
+
