@@ -1,4 +1,3 @@
-
 import os
 import unicodedata
 from datetime import date
@@ -18,8 +17,9 @@ SUPABASE_URL = os.getenv(
     "https://ptxtclyfwlcwqgwzqieu.supabase.co"
 ).rstrip("/")
 
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_PUBLISHABLE_KEY"
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_PUBLISHABLE_KEY")
+    or os.getenv("SUPABASE_KEY")
 )
 
 SUPABASE_TABLE = os.getenv(
@@ -231,6 +231,7 @@ def _normalizar_status(status: Any) -> str:
     chave = _normalizar_texto(status)
 
     mapa = {
+
         "patente_concedida":
             "Patente Concedida",
 
@@ -310,6 +311,7 @@ def _preparar_patentes(
             "numero_patente",
             "processo",
             "numero de patente",
+            "numero do processo",
             "patente",
         ),
 
@@ -318,6 +320,7 @@ def _preparar_patentes(
             "deposito",
             "depósito",
             "data do deposito",
+            "data do depósito",
         ),
 
         "data_concessao": (
@@ -593,9 +596,7 @@ def _calcular_cronograma(
     modalidade_pi: Any
 ) -> List[Dict[str, Any]]:
 
-    inicio = pd.to_datetime(
-        data_dep
-    )
+    inicio = pd.to_datetime(data_dep)
 
     modalidade = normalizar_modalidade(
         modalidade_pi
@@ -740,11 +741,11 @@ def garantir_pagamentos_existentes(
         "Patente"
     )
 
-    # Verifica se já existem pagamentos.
     url = (
         f"{_endpoint('anuidades')}"
         f"?select=id"
-        f"&patente_id=eq.{quote(str(patente_id), safe='')}"
+        f"&patente_id=eq."
+        f"{quote(str(patente_id), safe='')}"
         f"&limit=1"
     )
 
@@ -813,13 +814,15 @@ def garantir_pagamentos_existentes(
         _request(
             "POST",
             _endpoint("anuidades"),
-            headers=_headers("return=minimal"),
+            headers=_headers(
+                "return=minimal,resolution=ignore-duplicates"
+            ),
             json=registros,
         )
 
 
 # ============================================================
-# ADICIONAR PATENTE
+# ADICIONAR PI
 # ============================================================
 
 def adicionar_patente(
@@ -894,7 +897,7 @@ def adicionar_patente(
 
 
 # ============================================================
-# ATUALIZAR PATENTE
+# ATUALIZAR PI
 # ============================================================
 
 def atualizar_patente(
@@ -904,6 +907,10 @@ def atualizar_patente(
 
     try:
 
+        payload = _payload_patente(
+            dados
+        )
+
         _request(
             "PATCH",
             _patente_url(
@@ -912,13 +919,9 @@ def atualizar_patente(
             headers=_headers(
                 "return=minimal"
             ),
-            json=_payload_patente(
-                dados
-            ),
+            json=payload,
         )
 
-        # Se o cronograma ainda não existir,
-        # cria automaticamente.
         garantir_pagamentos_existentes(
             patente_id
         )
@@ -937,7 +940,7 @@ def atualizar_patente(
 
 
 # ============================================================
-# IMPORTAÇÃO
+# IMPORTAÇÃO / ATUALIZAÇÃO DE PI
 # ============================================================
 
 def salvar_patente_importada(
@@ -947,8 +950,16 @@ def salvar_patente_importada(
 
     try:
 
+        numero_original = dados.get("numero")
+
+        if not numero_original:
+            return (
+                False,
+                "Número da PI não informado."
+            )
+
         numero = quote(
-            str(dados["numero"]),
+            str(numero_original),
             safe=""
         )
 
@@ -982,6 +993,7 @@ def salvar_patente_importada(
                 json=payload,
             )
 
+            # Não recria anuidades existentes.
             garantir_pagamentos_existentes(
                 patente_id
             )
@@ -1031,15 +1043,392 @@ def salvar_patente_importada(
 
         return (
             False,
-            str(exc)
+            f"Erro ao importar PI: {exc}"
         )
 
 
 # ============================================================
-# OBTER ANUIDADES / PAGAMENTOS
+# OBTER ANUIDADES
 # ============================================================
 
 def obter_anuidades(
     patente_id: Any
-) -> pd
+) -> pd.DataFrame:
 
+    patente_id_encoded = quote(
+        str(patente_id),
+        safe=""
+    )
+
+    url = (
+        f"{_endpoint('anuidades')}"
+        f"?select=*"
+        f"&patente_id=eq.{patente_id_encoded}"
+        f"&order=numero_anuidade.asc"
+    )
+
+    data = _request(
+        "GET",
+        url,
+        headers=_headers(),
+    )
+
+    df = pd.DataFrame(
+        data or []
+    )
+
+    # Se ainda não existir cronograma,
+    # cria automaticamente.
+    if df.empty:
+
+        garantir_pagamentos_existentes(
+            patente_id
+        )
+
+        data = _request(
+            "GET",
+            url,
+            headers=_headers(),
+        )
+
+        df = pd.DataFrame(
+            data or []
+        )
+
+    return df
+
+
+# ============================================================
+# ATUALIZAR PAGAMENTO
+# ============================================================
+
+def atualizar_status_anuidade(
+    patente_id: Any,
+    numero_anuidade: int,
+    status: str,
+    data_pagamento: Optional[Any] = None,
+) -> Tuple[bool, str]:
+
+    try:
+
+        status = (
+            str(status)
+            .strip()
+            .lower()
+        )
+
+        if status not in {
+            "pendente",
+            "pago",
+            "nao_pagar",
+        }:
+
+            raise ValueError(
+                f"Status de anuidade inválido: {status}"
+            )
+
+        # Garante que a linha exista.
+        garantir_pagamentos_existentes(
+            patente_id
+        )
+
+        patente_id_encoded = quote(
+            str(patente_id),
+            safe=""
+        )
+
+        numero_encoded = quote(
+            str(numero_anuidade),
+            safe=""
+        )
+
+        url = (
+            f"{_endpoint('anuidades')}"
+            f"?patente_id=eq.{patente_id_encoded}"
+            f"&numero_anuidade=eq.{numero_encoded}"
+        )
+
+        payload = {
+            "status": status,
+
+            "data_pagamento": (
+                _parse_data(
+                    data_pagamento
+                )
+                if status == "pago"
+                else None
+            ),
+        }
+
+        resultado = _request(
+            "PATCH",
+            url,
+            headers=_headers(
+                "return=representation"
+            ),
+            json=payload,
+        )
+
+        if not resultado:
+
+            raise RuntimeError(
+                "A anuidade não foi encontrada "
+                "no Supabase."
+            )
+
+        return (
+            True,
+            "Pagamento atualizado com sucesso."
+        )
+
+    except Exception as exc:
+
+        return (
+            False,
+            f"Erro ao atualizar pagamento: {exc}"
+        )
+
+
+# ============================================================
+# EXCLUSÃO DE PI
+# ============================================================
+
+def deletar_patente(
+    patente_id: Any
+) -> Tuple[bool, str]:
+
+    try:
+
+        _request(
+            "DELETE",
+            _patente_url(
+                patente_id
+            ),
+            headers=_headers(
+                "return=minimal"
+            ),
+        )
+
+        return (
+            True,
+            "PI excluída com sucesso."
+        )
+
+    except Exception as exc:
+
+        return (
+            False,
+            f"Erro ao excluir PI: {exc}"
+        )
+
+
+# ============================================================
+# ANÁLISE DO EXCEL
+# ============================================================
+
+def analisar_inconsistencias_excel(
+    arquivo
+) -> Dict[str, Any]:
+
+    try:
+
+        df = pd.read_excel(
+            arquivo
+        )
+
+        if df.empty:
+
+            return {
+                "ok": False,
+                "faltantes": [],
+                "total_linhas": 0,
+                "colunas": [],
+                "erro": "O arquivo Excel está vazio.",
+            }
+
+        colunas_normalizadas = {
+            _normalizar_texto(col)
+            for col in df.columns
+        }
+
+        obrigatorias = {
+
+            "numero_patente": [
+                "numero_patente",
+                "processo",
+                "numero de patente",
+                "numero do processo",
+                "patente",
+            ],
+
+            "data_deposito": [
+                "data_deposito",
+                "deposito",
+                "data do deposito",
+                "data do depósito",
+            ],
+        }
+
+        faltantes = []
+
+        for campo, aliases in obrigatorias.items():
+
+            encontrou = any(
+                _normalizar_texto(alias)
+                in colunas_normalizadas
+                for alias in aliases
+            )
+
+            if not encontrou:
+                faltantes.append(
+                    campo
+                )
+
+        return {
+            "ok": len(faltantes) == 0,
+            "faltantes": faltantes,
+            "total_linhas": len(df),
+            "colunas": list(df.columns),
+        }
+
+    except Exception as exc:
+
+        return {
+            "ok": False,
+            "faltantes": [],
+            "total_linhas": 0,
+            "colunas": [],
+            "erro": str(exc),
+        }
+
+
+# ============================================================
+# IMPORTAR EXCEL
+# ============================================================
+
+def importar_excel(
+    arquivo
+) -> Tuple[bool, str]:
+
+    try:
+
+        df = pd.read_excel(
+            arquivo
+        )
+
+        if df.empty:
+
+            return (
+                False,
+                "O arquivo Excel está vazio."
+            )
+
+        df = _preparar_patentes(
+            df
+        )
+
+        sucessos = 0
+        erros = []
+
+        for indice, row in df.iterrows():
+
+            dados = {
+                coluna: _valor_limpo(
+                    row.get(coluna)
+                )
+                for coluna in df.columns
+            }
+
+            dados["numero"] = (
+                dados.get(
+                    "numero_patente"
+                )
+            )
+
+            dados["data_dep"] = (
+                _parse_data(
+                    dados.get(
+                        "data_deposito"
+                    )
+                )
+            )
+
+            dados["data_conc"] = (
+                _parse_data(
+                    dados.get(
+                        "data_concessao"
+                    )
+                )
+            )
+
+            dados["status_patente"] = (
+                dados.get(
+                    "status"
+                )
+            )
+
+            try:
+
+                if not dados["numero"]:
+
+                    raise ValueError(
+                        "Número da PI não informado."
+                    )
+
+                if not dados["data_dep"]:
+
+                    raise ValueError(
+                        "Data de depósito não informada."
+                    )
+
+                ok, mensagem = (
+                    salvar_patente_importada(
+                        dados
+                    )
+                )
+
+                if ok:
+
+                    sucessos += 1
+
+                else:
+
+                    erros.append(
+                        f"Linha {indice + 2}: "
+                        f"{mensagem}"
+                    )
+
+            except Exception as exc:
+
+                erros.append(
+                    f"Linha {indice + 2}: "
+                    f"{exc}"
+                )
+
+        if erros:
+
+            return (
+                sucessos > 0,
+
+                f"{sucessos} registro(s) "
+                f"importado(s). "
+                f"{len(erros)} erro(s): "
+                + " | ".join(
+                    erros[:5]
+                )
+            )
+
+        return (
+            True,
+
+            f"{sucessos} registro(s) "
+            "importado(s) com sucesso "
+            "no Supabase."
+        )
+
+    except Exception as exc:
+
+        return (
+            False,
+            f"Erro ao importar Excel: {exc}"
+        )
