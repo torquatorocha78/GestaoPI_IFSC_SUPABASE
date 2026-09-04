@@ -1,8 +1,6 @@
 import pandas as pd
-
 import database as db
 import utils
-
 
 def _modalidade(row):
     return db.normalizar_modalidade(row.get("modalidade_pi"))
@@ -15,19 +13,20 @@ def analisar_pergunta(df_patentes, pergunta):
 
     modalidades = df_patentes["modalidade_pi"].apply(db.normalizar_modalidade)
 
-    if "software" in pergunta_lower or "programa" in pergunta_lower:
-        total = int((modalidades == "Software").sum())
-        return f"💻 **Softwares cadastrados:** {total}"
+    mapeamento_simples = {
+        "software": ("Software", "💻 **Softwares cadastrados:**"),
+        "programa": ("Software", "💻 **Softwares cadastrados:**"),
+        "desenho": ("Desenho Industrial", "🎨 **Desenhos Industriais cadastrados:**"),
+        "industrial": ("Desenho Industrial", "🎨 **Desenhos Industriais cadastrados:**"),
+        "patente": ("Patente", "📊 **Patentes cadastradas:**"),
+    }
 
-    if "desenho" in pergunta_lower or "industrial" in pergunta_lower:
-        total = int((modalidades == "Desenho Industrial").sum())
-        return f"🎨 **Desenhos Industriais cadastrados:** {total}"
+    for termo, (tipo, msg) in mapeamento_simples.items():
+        if termo in pergunta_lower:
+            total = int((modalidades == tipo).sum())
+            return f"{msg} {total}"
 
-    if "patente" in pergunta_lower:
-        total = int((modalidades == "Patente").sum())
-        return f"📊 **Patentes cadastradas:** {total}"
-
-    if "vencida" in pergunta_lower or "vencido" in pergunta_lower or "atraso" in pergunta_lower:
+    if any(x in pergunta_lower for x in ("vencida", "vencido", "atraso")):
         vencidos = 0
         for _, pi in df_patentes.iterrows():
             for _, pgto in db.obter_anuidades(pi["id"]).iterrows():
@@ -40,10 +39,11 @@ def analisar_pergunta(df_patentes, pergunta):
                     pgto["data_fim_extraordinario"],
                     pgto.get("data_pagamento"),
                 )
-                vencidos += 1 if status == "vermelho" else 0
+                if status == "vermelho":
+                    vencidos += 1
         return f"🚨 **Pagamentos vencidos:** {vencidos}"
 
-    if "quantas" in pergunta_lower or "total" in pergunta_lower or "ativos" in pergunta_lower:
+    if any(x in pergunta_lower for x in ("quantas", "total", "ativos")):
         resumo = modalidades.value_counts()
         linhas = "\n".join(f"- **{tipo}:** {qtd}" for tipo, qtd in resumo.items())
         return f"📊 **Total geral:** {len(df_patentes)} registros.\n\n{linhas}"
