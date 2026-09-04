@@ -1,1501 +1,472 @@
 import os
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional
+import unicodedata
+import json
+from datetime import date
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import pandas as pd
 import requests
-import streamlit as st
 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://ptxtclyfwlcwqgwzqieu.supabase.co").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_8MftwvPe-FtJoVOLvOz7dQ_c5BmJzuX")
+SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "patentes")
 
-# ============================================================
-# CONFIGURAÇÃO DO SUPABASE
-# ============================================================
-
-def _get_secret(nome: str, padrao: Any = None) -> Any:
-    """
-    Procura uma configuração primeiro nas variáveis de ambiente
-    e depois nos Secrets do Streamlit.
-    """
-    valor = os.getenv(nome)
-
-    if valor:
-        return valor
-
-    try:
-        valor = st.secrets.get(nome)
-        if valor:
-            return valor
-    except Exception:
-        pass
-
-    return padrao
-
-
-SUPABASE_URL = _get_secret("SUPABASE_URL")
-SUPABASE_KEY = (
-    _get_secret("SUPABASE_KEY")
-    or _get_secret("SUPABASE_PUBLISHABLE_KEY")
-    or _get_secret("SUPABASE_ANON_KEY")
-)
-
-if SUPABASE_URL:
-    SUPABASE_URL = SUPABASE_URL.rstrip("/")
-
-
-TIMEOUT = 30
-
-
-# ============================================================
-# CONFIGURAÇÃO DAS TABELAS
-# ============================================================
-
-TABELA_PATENTES = "patentes"
-TABELA_ANUIDADES = "anuidades"
-
-
-# ============================================================
-# FUNÇÕES BÁSICAS DO SUPABASE
-# ============================================================
-
-def _verificar_configuracao() -> None:
-    if not SUPABASE_URL:
-        raise RuntimeError(
-            "SUPABASE_URL não está configurada nos Secrets do Streamlit."
-        )
-
-    if not SUPABASE_KEY:
-        raise RuntimeError(
-            "SUPABASE_PUBLISHABLE_KEY não está configurada "
-            "nos Secrets do Streamlit."
-        )
-
-
-def _url(tabela: str) -> str:
-    return f"{SUPABASE_URL}/rest/v1/{tabela}"
-
+# Cache dinâmico para colunas existentes no Supabase
+_COLUNAS_DISPONIVEIS = set()
 
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
-
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
-
     if prefer:
         headers["Prefer"] = prefer
-
     return headers
 
 
-def _tratar_resposta(response: requests.Response) -> Any:
-
-    if response.ok:
-
-        if not response.text:
-            return None
-
-        try:
-            return response.json()
-        except Exception:
-            return response.text
-
-    raise RuntimeError(
-        f"Erro Supabase HTTP {response.status_code}: "
-        f"{response.text}"
-    )
+def _endpoint(table: str = SUPABASE_TABLE) -> str:
+    return f"{SUPABASE_URL}/rest/v1/{table}"
 
 
-# ============================================================
-# INICIALIZAÇÃO / TESTE
-# ============================================================
-
-def init_database() -> None:
-    """
-    Mantém compatibilidade com o app.py.
-
-    O banco é o Supabase.
-    Não existe mais banco SQLite local.
-    """
-
-    _verificar_configuracao()
-
-    response = requests.get(
-        _url(TABELA_PATENTES),
-        headers=_headers(),
-        params={
-            "select": "id",
-            "limit": "1",
-        },
-        timeout=TIMEOUT,
-    )
-
-    if not response.ok:
-        raise RuntimeError(
-            f"Não foi possível conectar ao Supabase: "
-            f"{response.status_code} - {response.text}"
-        )
-
-
-def testar_conexao() -> bool:
-
+def _request(method: str, url: str, **kwargs: Any) -> Any:
     try:
-        init_database()
-        return True
-    except Exception:
-        return False
+        response = requests.request(method, url, timeout=30, **kwargs)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Erro de rede ao conectar ao Supabase: {exc}") from exc
+    if response.status_code >= 400:
+        try:
+            detalhe = response.json()
+        except Exception:
+            detalhe = response.text
+        raise RuntimeError(f"Supabase retornou {response.status_code}: {detalhe}")
+    return response.json() if response.text else None
 
 
-# ============================================================
-# LIMPEZA E CONVERSÃO DE VALORES
-# ============================================================
+def _normalizar_texto(valor: Any) -> str:
+    texto = "" if valor is None or pd.isna(valor) else str(valor).strip().lower()
+    texto = "".join(
+        c for c in unicodedata.normalize("NFKD", texto)
+        if not unicodedata.combining(c)
+    )
+    for char in ["/", "\\", "-", ".", "(", ")", ":", ";", "_"]:
+        texto = texto.replace(char, " ")
+    return "_".join(texto.split())
+
+
+def normalizar_modalidade(modalidade: Any) -> str:
+    chave = _normalizar_texto(modalidade)
+    if "software" in chave or "programa" in chave:
+        return "Software"
+    if "desenho" in chave or chave in {"di", "desenho_industrial"}:
+        return "Desenho Industrial"
+    return "Patente"
+
 
 def _valor_limpo(valor: Any) -> Optional[Any]:
-    """
-    Converte valores vazios para None.
-
-    No JSON enviado ao Supabase, None vira NULL no PostgreSQL.
-    """
-
     if valor is None:
         return None
-
     try:
         if pd.isna(valor):
             return None
     except Exception:
         pass
-
     if isinstance(valor, str):
-
         valor = valor.strip()
-
-        if valor == "":
-            return None
-
-        if valor.lower() in {
-            "nan",
-            "none",
-            "null",
-            "nat",
-            "n/a",
-            "na",
-        }:
-            return None
-
+        return valor or None
     return valor
 
 
 def _parse_data(valor: Any) -> Optional[str]:
-
     valor = _valor_limpo(valor)
-
     if valor is None:
         return None
-
-    if isinstance(valor, pd.Timestamp):
-        return valor.strftime("%Y-%m-%d")
-
-    if isinstance(valor, datetime):
-        return valor.strftime("%Y-%m-%d")
-
-    if isinstance(valor, date):
-        return valor.strftime("%Y-%m-%d")
-
-    if isinstance(valor, str):
-
-        formatos = [
-            "%Y-%m-%d",
-            "%d/%m/%Y",
-            "%d-%m-%Y",
-            "%Y/%m/%d",
-        ]
-
-        for formato in formatos:
-            try:
-                return datetime.strptime(
-                    valor,
-                    formato
-                ).strftime("%Y-%m-%d")
-            except ValueError:
-                pass
-
+    if hasattr(valor, "date") and not isinstance(valor, str):
+        return valor.date().isoformat()
     try:
-
-        data = pd.to_datetime(
-            valor,
-            errors="coerce"
-        )
-
-        if pd.isna(data):
-            return None
-
-        return data.strftime("%Y-%m-%d")
-
+        return pd.to_datetime(str(valor).strip(), dayfirst=True, errors="raise").date().isoformat()
     except Exception:
-
-        return None
-
-
-def _parse_int(valor: Any) -> Optional[int]:
-
-    valor = _valor_limpo(valor)
-
-    if valor is None:
-        return None
-
-    try:
-        return int(float(valor))
-    except Exception:
-        return None
+        return str(valor).strip() or None
 
 
-# ============================================================
-# PATENTES
-# ============================================================
-
-def _preparar_patentes(dados: List[Dict[str, Any]]) -> pd.DataFrame:
-
-    if not dados:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(dados)
-
-    # --------------------------------------------------------
-    # Tradução dos nomes do banco para os nomes usados pelo app
-    # --------------------------------------------------------
-
+def _normalizar_status(status: Any) -> str:
+    status = _valor_limpo(status)
+    if not status:
+        return "Ativo"
+    chave = _normalizar_texto(status)
     mapa = {
-        "id": "id",
-        "pedido": "numero_patente",
-        "data_deposito": "data_deposito",
-        "data_concessao": "data_concessao",
-        "resumo": "descricao",
-        "depositante_titular": "titular",
-        "gestor": "gestor",
-        "status": "status",
-        "titulo": "titulo",
-        "nome_inventores": "inventores",
-        "modalidade_pi": "modalidade_pi",
-        "ano": "ano",
-        "data_publicacao": "data_publicacao",
-        "data_exame": "data_exame",
-        "acordo_titularidade": "acordo_titularidade",
-        "ipc_classificacao": "ipc_classificacao",
-        "linguagem": "linguagem",
-        "campo_aplicacao": "campo_aplicacao",
-        "tipo_programa": "tipo_programa",
-        "created_at": "created_at",
-        "updated_at": "updated_at",
+        "patente_concedida": "Patente Concedida",
+        "concedido": "Patente Concedida",
+        "concessao": "Patente Concedida",
+        "tramitando_normal": "Tramitando Normal",
+        "indeferimento": "Indeferimento",
+        "recurso_contra_indeferimento": "Recurso contra indeferimento",
+        "pedido_de_exame": "Pedido de exame",
+        "arquivado": "Arquivado",
+        "desistencia": "Desistência",
     }
-
-    df = df.rename(columns=mapa)
-
-    colunas = [
-        "id",
-        "numero_patente",
-        "data_deposito",
-        "data_concessao",
-        "descricao",
-        "titular",
-        "gestor",
-        "status",
-        "titulo",
-        "inventores",
-        "modalidade_pi",
-        "ano",
-        "data_publicacao",
-        "data_exame",
-        "acordo_titularidade",
-        "ipc_classificacao",
-        "linguagem",
-        "campo_aplicacao",
-        "tipo_programa",
-        "created_at",
-        "updated_at",
-    ]
-
-    for coluna in colunas:
-
-        if coluna not in df.columns:
-            df[coluna] = None
-
-    return df[colunas]
-
-
-def obter_patentes() -> pd.DataFrame:
-
-    _verificar_configuracao()
-
-    response = requests.get(
-        _url(TABELA_PATENTES),
-        headers=_headers(),
-        params={
-            "select": "*",
-            "order": "id.asc",
-        },
-        timeout=TIMEOUT,
-    )
-
-    dados = _tratar_resposta(response)
-
-    if not dados:
-        return pd.DataFrame()
-
-    return _preparar_patentes(dados)
-
-
-def obter_patente_por_id(patente_id: int) -> Optional[Dict[str, Any]]:
-
-    _verificar_configuracao()
-
-    response = requests.get(
-        _url(TABELA_PATENTES),
-        headers=_headers(),
-        params={
-            "id": f"eq.{patente_id}",
-            "select": "*",
-            "limit": "1",
-        },
-        timeout=TIMEOUT,
-    )
-
-    dados = _tratar_resposta(response)
-
-    if not dados:
-        return None
-
-    return dados[0]
-
-
-# ============================================================
-# PAYLOAD DE PATENTE
-# ============================================================
-
-def _payload_patente(
-    numero_patente=None,
-    data_deposito=None,
-    data_concessao=None,
-    descricao=None,
-    titular=None,
-    gestor=None,
-    status=None,
-    titulo=None,
-    inventores=None,
-    modalidade_pi=None,
-    ano=None,
-    data_publicacao=None,
-    data_exame=None,
-    acordo_titularidade=None,
-    ipc_classificacao=None,
-    linguagem=None,
-    campo_aplicacao=None,
-    tipo_programa=None,
-) -> Dict[str, Any]:
-
-    return {
-        "pedido": _valor_limpo(numero_patente),
-        "data_deposito": _parse_data(data_deposito),
-        "data_concessao": _parse_data(data_concessao),
-        "resumo": _valor_limpo(descricao),
-        "depositante_titular": _valor_limpo(titular),
-        "gestor": _valor_limpo(gestor),
-        "status": _valor_limpo(status),
-        "titulo": _valor_limpo(titulo),
-        "nome_inventores": _valor_limpo(inventores),
-        "modalidade_pi": _valor_limpo(modalidade_pi),
-        "ano": _parse_int(ano),
-        "data_publicacao": _parse_data(data_publicacao),
-        "data_exame": _parse_data(data_exame),
-        "acordo_titularidade": _valor_limpo(acordo_titularidade),
-        "ipc_classificacao": _valor_limpo(ipc_classificacao),
-        "linguagem": _valor_limpo(linguagem),
-        "campo_aplicacao": _valor_limpo(campo_aplicacao),
-        "tipo_programa": _valor_limpo(tipo_programa),
-    }
-
-
-# ============================================================
-# ADICIONAR PATENTE
-# ============================================================
-
-def adicionar_patente(
-    numero_patente=None,
-    data_deposito=None,
-    data_concessao=None,
-    descricao=None,
-    titular=None,
-    gestor=None,
-    status=None,
-    titulo=None,
-    inventores=None,
-    modalidade_pi=None,
-    ano=None,
-    data_publicacao=None,
-    data_exame=None,
-    acordo_titularidade=None,
-    ipc_classificacao=None,
-    linguagem=None,
-    campo_aplicacao=None,
-    tipo_programa=None,
-) -> Dict[str, Any]:
-
-    _verificar_configuracao()
-
-    payload = _payload_patente(
-        numero_patente,
-        data_deposito,
-        data_concessao,
-        descricao,
-        titular,
-        gestor,
-        status,
-        titulo,
-        inventores,
-        modalidade_pi,
-        ano,
-        data_publicacao,
-        data_exame,
-        acordo_titularidade,
-        ipc_classificacao,
-        linguagem,
-        campo_aplicacao,
-        tipo_programa,
-    )
-
-    response = requests.post(
-        _url(TABELA_PATENTES),
-        headers=_headers("return=representation"),
-        json=payload,
-        timeout=TIMEOUT,
-    )
-
-    dados = _tratar_resposta(response)
-
-    if not dados:
-        raise RuntimeError(
-            "O Supabase não retornou a patente criada."
-        )
-
-    patente = dados[0]
-
-    patente_id = patente.get("id")
-
-    if patente_id is not None:
-        garantir_pagamentos_existentes(patente_id)
-
-    return patente
-
-
-# ============================================================
-# ATUALIZAR PATENTE
-# ============================================================
-
-def atualizar_patente(
-    patente_id,
-    numero_patente=None,
-    data_deposito=None,
-    data_concessao=None,
-    descricao=None,
-    titular=None,
-    gestor=None,
-    status=None,
-    titulo=None,
-    inventores=None,
-    modalidade_pi=None,
-    ano=None,
-    data_publicacao=None,
-    data_exame=None,
-    acordo_titularidade=None,
-    ipc_classificacao=None,
-    linguagem=None,
-    campo_aplicacao=None,
-    tipo_programa=None,
-) -> Dict[str, Any]:
-
-    _verificar_configuracao()
-
-    payload = _payload_patente(
-        numero_patente,
-        data_deposito,
-        data_concessao,
-        descricao,
-        titular,
-        gestor,
-        status,
-        titulo,
-        inventores,
-        modalidade_pi,
-        ano,
-        data_publicacao,
-        data_exame,
-        acordo_titularidade,
-        ipc_classificacao,
-        linguagem,
-        campo_aplicacao,
-        tipo_programa,
-    )
-
-    response = requests.patch(
-        _url(TABELA_PATENTES),
-        headers=_headers("return=representation"),
-        params={
-            "id": f"eq.{patente_id}",
-        },
-        json=payload,
-        timeout=TIMEOUT,
-    )
-
-    dados = _tratar_resposta(response)
-
-    if not dados:
-        raise RuntimeError(
-            "Nenhuma patente foi atualizada."
-        )
-
-    garantir_pagamentos_existentes(patente_id)
-
-    return dados[0]
-
-
-# ============================================================
-# EXCLUIR PATENTE
-# ============================================================
-
-def excluir_patente(patente_id: int) -> bool:
-
-    _verificar_configuracao()
-
-    # Primeiro excluímos as anuidades.
-    response_anuidades = requests.delete(
-        _url(TABELA_ANUIDADES),
-        headers=_headers(),
-        params={
-            "patente_id": f"eq.{patente_id}",
-        },
-        timeout=TIMEOUT,
-    )
-
-    if not response_anuidades.ok:
-        raise RuntimeError(
-            "Erro ao excluir as anuidades: "
-            f"{response_anuidades.text}"
-        )
-
-    response = requests.delete(
-        _url(TABELA_PATENTES),
-        headers=_headers(),
-        params={
-            "id": f"eq.{patente_id}",
-        },
-        timeout=TIMEOUT,
-    )
-
-    return response.ok
-
-
-# ============================================================
-# CRONOGRAMA DE PAGAMENTOS
-# ============================================================
-
-def _calcular_cronograma(
-    patente: Dict[str, Any]
-) -> List[Dict[str, Any]]:
-
-    patente_id = patente.get("id")
-
-    modalidade = (
-        patente.get("modalidade_pi")
-        or ""
-    ).strip().lower()
-
-    data_deposito = _parse_data(
-        patente.get("data_deposito")
-    )
-
-    if not data_deposito:
-        return []
-
-    data_dep = datetime.strptime(
-        data_deposito,
-        "%Y-%m-%d"
-    ).date()
-
-    cronograma = []
-
-    # --------------------------------------------------------
-    # SOFTWARE
-    # --------------------------------------------------------
-
-    if "software" in modalidade or "programa" in modalidade:
-
-        cronograma.append({
-            "patente_id": patente_id,
-            "numero_anuidade": 1,
-            "status": "PENDENTE",
-            "data_pagamento": None,
-            "descricao_pagamento": "Taxa única de depósito",
-            "data_inicio_ordinario": data_dep.isoformat(),
-            "data_fim_ordinario": data_dep.isoformat(),
-            "data_inicio_extraordinario": None,
-            "data_fim_extraordinario": None,
-            "modalidade_pi": patente.get("modalidade_pi"),
-        })
-
-        return cronograma
-
-    # --------------------------------------------------------
-    # DESENHO INDUSTRIAL
-    # --------------------------------------------------------
-
-    if (
-        "desenho" in modalidade
-        or "modelo" in modalidade
-    ):
-
-        # Depósito inicial
-        cronograma.append({
-            "patente_id": patente_id,
-            "numero_anuidade": 1,
-            "status": "PENDENTE",
-            "data_pagamento": None,
-            "descricao_pagamento": "Depósito inicial",
-            "data_inicio_ordinario": data_dep.isoformat(),
-            "data_fim_ordinario": data_dep.isoformat(),
-            "data_inicio_extraordinario": None,
-            "data_fim_extraordinario": None,
-            "modalidade_pi": patente.get("modalidade_pi"),
-        })
-
-        # 4 quinquênios
-        for numero in range(2, 6):
-
-            inicio = data_dep.replace(
-                year=data_dep.year + ((numero - 1) * 5)
-            )
-
-            fim = inicio + timedelta(days=365)
-
-            cronograma.append({
-                "patente_id": patente_id,
-                "numero_anuidade": numero,
-                "status": "PENDENTE",
-                "data_pagamento": None,
-                "descricao_pagamento": f"{numero - 1}º quinquênio",
-                "data_inicio_ordinario": inicio.isoformat(),
-                "data_fim_ordinario": fim.isoformat(),
-                "data_inicio_extraordinario": (
-                    fim + timedelta(days=1)
-                ).isoformat(),
-                "data_fim_extraordinario": (
-                    fim + timedelta(days=60)
-                ).isoformat(),
-                "modalidade_pi": patente.get("modalidade_pi"),
-            })
-
-        return cronograma
-
-    # --------------------------------------------------------
-    # PATENTE
-    # --------------------------------------------------------
-
-    # 20 anuidades
-    for numero in range(1, 21):
-
-        # A primeira anuidade começa no aniversário do depósito.
-        inicio = data_dep.replace(
-            year=data_dep.year + numero
-        )
-
-        fim = inicio + timedelta(days=365)
-
-        inicio_extra = fim + timedelta(days=1)
-        fim_extra = fim + timedelta(days=180)
-
-        cronograma.append({
-            "patente_id": patente_id,
-            "numero_anuidade": numero,
-            "status": "PENDENTE",
-            "data_pagamento": None,
-            "descricao_pagamento": f"{numero}ª anuidade",
-            "data_inicio_ordinario": inicio.isoformat(),
-            "data_fim_ordinario": fim.isoformat(),
-            "data_inicio_extraordinario": inicio_extra.isoformat(),
-            "data_fim_extraordinario": fim_extra.isoformat(),
-            "modalidade_pi": patente.get("modalidade_pi"),
-        })
-
-    return cronograma
-
-
-# ============================================================
-# GARANTIR CRONOGRAMA NO SUPABASE
-# ============================================================
-
-def garantir_pagamentos_existentes(
-    patente_id: int
-) -> None:
-    """
-    Garante que o cronograma de pagamentos exista no Supabase.
-
-    IMPORTANTE:
-    O campo 'id' NÃO é enviado.
-    O PostgreSQL gera automaticamente usando a sequence.
-    """
-
-    _verificar_configuracao()
-
-    patente = obter_patente_por_id(patente_id)
-
-    if not patente:
-        return
-
-    cronograma = _calcular_cronograma(patente)
-
-    if not cronograma:
-        return
-
-    # Verifica quais anuidades já existem.
-    response = requests.get(
-        _url(TABELA_ANUIDADES),
-        headers=_headers(),
-        params={
-            "patente_id": f"eq.{patente_id}",
-            "select": "numero_anuidade",
-        },
-        timeout=TIMEOUT,
-    )
-
-    existentes = _tratar_resposta(response)
-
-    numeros_existentes = {
-        int(item["numero_anuidade"])
-        for item in (existentes or [])
-        if item.get("numero_anuidade") is not None
-    }
-
-    faltantes = [
-        item
-        for item in cronograma
-        if int(item["numero_anuidade"])
-        not in numeros_existentes
-    ]
-
-    if not faltantes:
-        return
-
-    response = requests.post(
-        _url(TABELA_ANUIDADES),
-        headers=_headers(
-            "return=minimal,resolution=ignore-duplicates"
-        ),
-        json=faltantes,
-        timeout=TIMEOUT,
-    )
-
-    if not response.ok:
-        raise RuntimeError(
-            "Erro ao criar cronograma de anuidades: "
-            f"{response.status_code} - {response.text}"
-        )
-
-
-# ============================================================
-# OBTER ANUIDADES
-# ============================================================
-
-def obter_anuidades(
-    patente_id: Optional[int] = None
-) -> pd.DataFrame:
-
-    _verificar_configuracao()
-
-    if patente_id is not None:
-
-        # Primeiro garante que o cronograma exista.
-        garantir_pagamentos_existentes(patente_id)
-
-        params = {
-            "patente_id": f"eq.{patente_id}",
-            "select": "*",
-            "order": "numero_anuidade.asc",
-        }
-
-    else:
-
-        # Garante cronograma para todas as PIs.
-        patentes = obter_patentes()
-
-        if not patentes.empty:
-
-            for _, patente in patentes.iterrows():
-
-                try:
-                    garantir_pagamentos_existentes(
-                        int(patente["id"])
-                    )
-                except Exception:
-                    pass
-
-        params = {
-            "select": "*",
-            "order": "numero_anuidade.asc",
-        }
-
-    response = requests.get(
-        _url(TABELA_ANUIDADES),
-        headers=_headers(),
-        params=params,
-        timeout=TIMEOUT,
-    )
-
-    dados = _tratar_resposta(response)
-
-    if not dados:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(dados)
-
-    # --------------------------------------------------------
-    # Calcula status automaticamente quando ainda estiver
-    # pendente.
-    # --------------------------------------------------------
-
-    hoje = date.today()
-
-    def calcular_status(row):
-
-        status_atual = row.get("status")
-
-        if status_atual:
-            status_texto = str(status_atual).upper()
-
-            if status_texto in {
-                "PAGO",
-                "PAGA",
-                "QUITADO",
-                "QUITADA",
-            }:
-                return "PAGO"
-
-        data_fim = _parse_data(
-            row.get("data_fim_ordinario")
-        )
-
-        data_fim_extra = _parse_data(
-            row.get("data_fim_extraordinario")
-        )
-
-        if data_fim:
-
-            fim = datetime.strptime(
-                data_fim,
-                "%Y-%m-%d"
-            ).date()
-
-            if hoje <= fim:
-                return "PENDENTE"
-
-        if data_fim_extra:
-
-            fim_extra = datetime.strptime(
-                data_fim_extra,
-                "%Y-%m-%d"
-            ).date()
-
-            if hoje <= fim_extra:
-                return "EM PRAZO EXTRAORDINÁRIO"
-
-        return "VENCIDA"
-
-    df["status_calculado"] = df.apply(
-        calcular_status,
-        axis=1
-    )
-
-    return df
-
-
-# ============================================================
-# ATUALIZAR PAGAMENTO DE ANUIDADE
-# ============================================================
-
-def atualizar_status_anuidade(
-    patente_id: int,
-    numero_anuidade: int,
-    status: str,
-    data_pagamento: Any = None,
-    descricao_pagamento: Any = None,
-) -> bool:
-
-    _verificar_configuracao()
-
-    payload = {
-        "patente_id": int(patente_id),
-        "numero_anuidade": int(numero_anuidade),
-        "status": _valor_limpo(status),
-        "data_pagamento": _parse_data(data_pagamento),
-        "descricao_pagamento": _valor_limpo(
-            descricao_pagamento
-        ),
-    }
-
-    response = requests.post(
-        _url(TABELA_ANUIDADES),
-        headers=_headers(
-            "return=representation,resolution=merge-duplicates"
-        ),
-        params={
-            "on_conflict": "patente_id,numero_anuidade"
-        },
-        json=payload,
-        timeout=TIMEOUT,
-    )
-
-    if not response.ok:
-        raise RuntimeError(
-            "Erro ao atualizar pagamento da anuidade: "
-            f"{response.status_code} - {response.text}"
-        )
-
-    return True
-
-
-# ============================================================
-# IMPORTAÇÃO EXCEL
-# ============================================================
-
-def _mapear_coluna(
-    colunas: List[str],
-    nomes_possiveis: List[str]
-) -> Optional[str]:
-
-    normalizadas = {
-        str(c).strip().lower(): c
-        for c in colunas
-    }
-
-    for nome in nomes_possiveis:
-
-        chave = nome.strip().lower()
-
-        if chave in normalizadas:
-            return normalizadas[chave]
-
+    return mapa.get(chave, str(status).strip())
+
+
+def _coluna_existente(df: pd.DataFrame, *nomes: str) -> Optional[str]:
+    normalizadas = {_normalizar_texto(col): col for col in df.columns}
+    for nome in nomes:
+        coluna = normalizadas.get(_normalizar_texto(nome))
+        if coluna is not None:
+            return coluna
     return None
 
 
-def _normalizar_colunas_excel(
-    df: pd.DataFrame
-) -> pd.DataFrame:
+def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
 
-    mapa = {}
-
-    equivalencias = {
-
-        "numero_patente": [
-            "numero_patente",
-            "número_patente",
-            "pedido",
-            "número do pedido",
-            "numero do pedido",
-            "nº pedido",
-            "nº do pedido",
-            "processo",
-        ],
-
-        "data_deposito": [
-            "data_deposito",
-            "data depósito",
-            "data de depósito",
-            "data_deposito",
-        ],
-
-        "data_concessao": [
-            "data_concessao",
-            "data concessao",
-            "data concessão",
-            "data de concessao",
-            "data de concessão",
-        ],
-
-        "descricao": [
-            "descricao",
-            "descrição",
-            "resumo",
-        ],
-
-        "titular": [
-            "titular",
-            "depositante_titular",
-            "depositante",
-            "depositante/titular",
-        ],
-
-        "gestor": [
-            "gestor",
-        ],
-
-        "status": [
-            "status",
-            "situação",
-            "situacao",
-        ],
-
-        "titulo": [
-            "titulo",
-            "título",
-        ],
-
-        "inventores": [
-            "inventores",
-            "nome_inventores",
-            "nome dos inventores",
-        ],
-
-        "modalidade_pi": [
-            "modalidade_pi",
-            "modalidade",
-            "modalidade pi",
-            "tipo de propriedade intelectual",
-        ],
-
-        "ano": [
-            "ano",
-        ],
-
-        "data_publicacao": [
-            "data_publicacao",
-            "data publicação",
-            "data de publicação",
-        ],
-
-        "data_exame": [
-            "data_exame",
-            "data exame",
-            "data de exame",
-        ],
-
-        "acordo_titularidade": [
-            "acordo_titularidade",
-            "acordo titularidade",
-            "acordo de titularidade",
-        ],
-
-        "ipc_classificacao": [
-            "ipc_classificacao",
-            "ipc",
-            "classificação ipc",
-            "classificacao ipc",
-        ],
-
-        "linguagem": [
-            "linguagem",
-        ],
-
-        "campo_aplicacao": [
-            "campo_aplicacao",
-            "campo aplicação",
-            "campo de aplicação",
-        ],
-
-        "tipo_programa": [
-            "tipo_programa",
-            "tipo programa",
-        ],
+    aliases = {
+        "numero_patente": ("numero_patente", "processo", "pedido", "numero de patente", "patente"),
+        "data_deposito": ("data_deposito", "deposito", "depósito", "data do deposito"),
+        "data_concessao": ("data_concessao", "data da concessao", "data da concessão"),
+        "descricao": ("descricao", "descrição", "resumo"),
+        "titular": ("titular", "depositante", "depositante_titular", "depositante/ titular", "depositante titular"),
+        "gestor": ("gestor",),
+        "status": ("status", "status do pedido", "situacao", "situação"),
+        "titulo": ("titulo", "título"),
+        "inventores": ("inventores", "nome_inventores", "nome dos inventores", "nome do inventor"),
+        "campus": ("campus",),
+        "atributos": ("atributos", "atributo"),
+        "id_externo": ("id_externo", "id do sistema"),
+        "modalidade_pi": ("modalidade_pi", "modalidade de pi", "modalidade", "tipo"),
+        "ano": ("ano",),
+        "data_publicacao": ("data_publicacao", "data da publicacao", "data da publicação"),
+        "data_exame": ("data_exame", "data exame", "exame"),
+        "acordo_titularidade": ("acordo_titularidade", "acordo de titularidade"),
+        "procuracao": ("procuracao", "procuração"),
+        "termo_cessao": ("termo_cessao", "termo de cessao", "termo de cessão"),
+        "ipc_classificacao": ("ipc_classificacao", "ipc classificacao", "ipc classificação", "ipc"),
+        "pagamentos_override": ("pagamentos_override", "pagamentos")
     }
 
-    for destino, possibilidades in equivalencias.items():
-
-        coluna = _mapear_coluna(
-            list(df.columns),
-            possibilidades
-        )
-
-        if coluna is not None:
-            mapa[coluna] = destino
-
-    return df.rename(columns=mapa)
-
-
-def salvar_patente_importada(
-    dados: Dict[str, Any]
-) -> Dict[str, Any]:
-
-    _verificar_configuracao()
-
-    numero = _valor_limpo(
-        dados.get("numero_patente")
-    )
-
-    if not numero:
-        raise ValueError(
-            "O número do pedido/patente é obrigatório."
-        )
-
-    payload = _payload_patente(
-        numero_patente=dados.get("numero_patente"),
-        data_deposito=dados.get("data_deposito"),
-        data_concessao=dados.get("data_concessao"),
-        descricao=dados.get("descricao"),
-        titular=dados.get("titular"),
-        gestor=dados.get("gestor"),
-        status=dados.get("status"),
-        titulo=dados.get("titulo"),
-        inventores=dados.get("inventores"),
-        modalidade_pi=dados.get("modalidade_pi"),
-        ano=dados.get("ano"),
-        data_publicacao=dados.get("data_publicacao"),
-        data_exame=dados.get("data_exame"),
-        acordo_titularidade=dados.get(
-            "acordo_titularidade"
-        ),
-        ipc_classificacao=dados.get(
-            "ipc_classificacao"
-        ),
-        linguagem=dados.get("linguagem"),
-        campo_aplicacao=dados.get(
-            "campo_aplicacao"
-        ),
-        tipo_programa=dados.get(
-            "tipo_programa"
-        ),
-    )
-
-    # --------------------------------------------------------
-    # Verifica se já existe pelo número do pedido
-    # --------------------------------------------------------
-
-    response = requests.get(
-        _url(TABELA_PATENTES),
-        headers=_headers(),
-        params={
-            "pedido": f"eq.{numero}",
-            "select": "*",
-            "limit": "1",
-        },
-        timeout=TIMEOUT,
-    )
-
-    existentes = _tratar_resposta(response)
-
-    # --------------------------------------------------------
-    # ATUALIZA
-    # --------------------------------------------------------
-
-    if existentes:
-
-        patente_id = existentes[0]["id"]
-
-        response = requests.patch(
-            _url(TABELA_PATENTES),
-            headers=_headers("return=representation"),
-            params={
-                "id": f"eq.{patente_id}",
-            },
-            json=payload,
-            timeout=TIMEOUT,
-        )
-
-        dados_retorno = _tratar_resposta(response)
-
-        patente = (
-            dados_retorno[0]
-            if dados_retorno
-            else existentes[0]
-        )
-
-    # --------------------------------------------------------
-    # INSERE
-    # --------------------------------------------------------
-
-    else:
-
-        response = requests.post(
-            _url(TABELA_PATENTES),
-            headers=_headers("return=representation"),
-            json=payload,
-            timeout=TIMEOUT,
-        )
-
-        dados_retorno = _tratar_resposta(response)
-
-        if not dados_retorno:
-            raise RuntimeError(
-                "Supabase não retornou o registro inserido."
-            )
-
-        patente = dados_retorno[0]
-
-    # --------------------------------------------------------
-    # Garante cronograma
-    # --------------------------------------------------------
-
-    patente_id = patente.get("id")
-
-    if patente_id is not None:
-
-        garantir_pagamentos_existentes(
-            int(patente_id)
-        )
-
-    return patente
-
-
-def importar_excel(
-    arquivo
-) -> Dict[str, Any]:
-
-    _verificar_configuracao()
-
-    # --------------------------------------------------------
-    # Lê Excel
-    # --------------------------------------------------------
-
-    try:
-        df = pd.read_excel(arquivo)
-    except Exception as e:
-        raise RuntimeError(
-            f"Não foi possível ler o arquivo Excel: {e}"
-        )
-
-    if df.empty:
-        return {
-            "total": 0,
-            "inseridos": 0,
-            "atualizados": 0,
-            "erros": [],
-            "dados": pd.DataFrame(),
-        }
-
-    # --------------------------------------------------------
-    # Normaliza nomes das colunas
-    # --------------------------------------------------------
-
-    df = _normalizar_colunas_excel(df)
-
-    resultados = []
-
-    erros = []
-
-    inseridos = 0
-    atualizados = 0
-
-    # --------------------------------------------------------
-    # Processa cada linha
-    # --------------------------------------------------------
-
-    for indice, linha in df.iterrows():
-
-        try:
-
-            dados = {
-                "numero_patente": _valor_limpo(
-                    linha.get("numero_patente")
-                ),
-
-                "data_deposito": _parse_data(
-                    linha.get("data_deposito")
-                ),
-
-                "data_concessao": _parse_data(
-                    linha.get("data_concessao")
-                ),
-
-                "descricao": _valor_limpo(
-                    linha.get("descricao")
-                ),
-
-                "titular": _valor_limpo(
-                    linha.get("titular")
-                ),
-
-                "gestor": _valor_limpo(
-                    linha.get("gestor")
-                ),
-
-                "status": _valor_limpo(
-                    linha.get("status")
-                ),
-
-                "titulo": _valor_limpo(
-                    linha.get("titulo")
-                ),
-
-                "inventores": _valor_limpo(
-                    linha.get("inventores")
-                ),
-
-                "modalidade_pi": _valor_limpo(
-                    linha.get("modalidade_pi")
-                ),
-
-                "ano": _parse_int(
-                    linha.get("ano")
-                ),
-
-                "data_publicacao": _parse_data(
-                    linha.get("data_publicacao")
-                ),
-
-                "data_exame": _parse_data(
-                    linha.get("data_exame")
-                ),
-
-                "acordo_titularidade": _valor_limpo(
-                    linha.get("acordo_titularidade")
-                ),
-
-                "ipc_classificacao": _valor_limpo(
-                    linha.get("ipc_classificacao")
-                ),
-
-                "linguagem": _valor_limpo(
-                    linha.get("linguagem")
-                ),
-
-                "campo_aplicacao": _valor_limpo(
-                    linha.get("campo_aplicacao")
-                ),
-
-                "tipo_programa": _valor_limpo(
-                    linha.get("tipo_programa")
-                ),
-            }
-
-            numero = dados["numero_patente"]
-
-            if not numero:
-                raise ValueError(
-                    "Número do pedido/patente vazio."
-                )
-
-            # Verifica existência antes de salvar.
-            response = requests.get(
-                _url(TABELA_PATENTES),
-                headers=_headers(),
-                params={
-                    "pedido": f"eq.{numero}",
-                    "select": "id",
-                    "limit": "1",
-                },
-                timeout=TIMEOUT,
-            )
-
-            existentes = _tratar_resposta(response)
-
-            salvar_patente_importada(dados)
-
-            if existentes:
-                atualizados += 1
+    for destino, nomes in aliases.items():
+        if destino in df.columns:
+            continue
+        origem = _coluna_existente(df, *nomes)
+        df[destino] = df[origem] if origem else None
+
+    if "id" not in df.columns:
+        df["id"] = range(1, len(df) + 1)
+
+    df["modalidade_pi"] = df["modalidade_pi"].apply(normalizar_modalidade)
+    df["status"] = df["status"].fillna("Ativo").replace("", "Ativo")
+    return df
+
+
+def init_database() -> None:
+    obter_patentes()
+
+
+def obter_patentes() -> pd.DataFrame:
+    global _COLUNAS_DISPONIVEIS
+    data = _request("GET", f"{_endpoint()}?select=*&order=id.asc", headers=_headers())
+    df = pd.DataFrame(data or [])
+    if not df.empty:
+        _COLUNAS_DISPONIVEIS = set(df.columns)
+    return _preparar_patentes(df)
+
+
+def _patente_url(patente_id: Any) -> str:
+    return f"{_endpoint()}?id=eq.{quote(str(patente_id), safe='')}"
+
+
+def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
+    # Mapeamento reverso para lidar dinamicamente com as colunas reais do banco Supabase
+    mapeamento_reverso = {
+        "numero_patente": ["pedido", "numero_patente", "processo"],
+        "titular": ["depositante_titular", "titular", "depositante"],
+        "inventores": ["nome_inventores", "inventores", "nome dos inventores"],
+        "descricao": ["resumo", "descricao", "descrição"]
+    }
+
+    payload_bruto = {
+        "numero_patente": dados.get("numero") or dados.get("numero_patente"),
+        "data_deposito": dados.get("data_dep") or dados.get("data_deposito"),
+        "data_concessao": dados.get("data_conc") or dados.get("data_concessao"),
+        "descricao": dados.get("descricao") or dados.get("resumo"),
+        "titular": dados.get("titular") or dados.get("depositante_titular"),
+        "gestor": dados.get("gestor"),
+        "status": _normalizar_status(dados.get("status_patente") or dados.get("status")),
+        "titulo": dados.get("titulo"),
+        "inventores": dados.get("inventores") or dados.get("nome_inventores"),
+        "campus": dados.get("campus"),
+        "atributos": dados.get("atributos"),
+        "id_externo": dados.get("id_externo"),
+        "modalidade_pi": normalizar_modalidade(dados.get("modalidade_pi")),
+        "ano": dados.get("ano"),
+        "data_publicacao": dados.get("data_publicacao"),
+        "data_exame": dados.get("data_exame"),
+        "acordo_titularidade": dados.get("acordo_titularidade"),
+        "procuracao": dados.get("procuracao"),
+        "termo_cessao": dados.get("termo_cessao"),
+        "ipc_classificacao": dados.get("ipc_classificacao"),
+        "pagamentos_override": dados.get("pagamentos_override")
+    }
+
+    payload_final = {}
+    for chave_std, valor in payload_bruto.items():
+        if chave_std in _COLUNAS_DISPONIVEIS:
+            payload_final[chave_std] = valor
+        elif chave_std in mapeamento_reverso:
+            substituto = next((alt for alt in mapeamento_reverso[chave_std] if alt in _COLUNAS_DISPONIVEIS), None)
+            if substituto:
+                payload_final[substituto] = valor
             else:
-                inseridos += 1
+                payload_final[chave_std] = valor
+        else:
+            payload_final[chave_std] = valor
 
-            resultados.append({
-                "linha_excel": indice + 2,
-                "pedido": numero,
-                "resultado": (
-                    "Atualizado"
-                    if existentes
-                    else "Inserido"
-                ),
-            })
+    return {chave: _valor_limpo(valor) for chave, valor in payload_final.items()}
 
-        except Exception as e:
 
-            erros.append({
-                "linha_excel": indice + 2,
-                "pedido": _valor_limpo(
-                    linha.get("numero_patente")
-                ),
-                "erro": str(e),
-            })
+def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, Any]]:
+    inicio = pd.to_datetime(data_dep)
+    modalidade = normalizar_modalidade(modalidade_pi)
 
-    return {
-        "total": len(df),
-        "inseridos": inseridos,
-        "atualizados": atualizados,
-        "erros": erros,
-        "dados": pd.DataFrame(resultados),
+    if modalidade == "Software":
+        itens = [(1, "Taxa única de depósito", 0)]
+    elif modalidade == "Desenho Industrial":
+        itens = [(1, "Taxa de depósito", 0)] + [(i + 1, f"{i}º quinquênio", i * 5) for i in range(1, 5)]
+    else:
+        itens = [(i, f"{i}ª anuidade", i - 1) for i in range(1, 21)]
+
+    cronograma = []
+    for numero, descricao, anos in itens:
+        ini_ord = inicio + pd.DateOffset(years=anos)
+        fim_ord = ini_ord + pd.DateOffset(months=3)
+        ini_ext = fim_ord + pd.DateOffset(days=1)
+        fim_ext = ini_ext + pd.DateOffset(months=6)
+        cronograma.append({
+            "id": f"{numero}",
+            "patente_id": None,
+            "numero_anuidade": numero,
+            "descricao_pagamento": descricao,
+            "data_inicio_ordinario": ini_ord.date().isoformat(),
+            "data_fim_ordinario": fim_ord.date().isoformat(),
+            "data_inicio_extraordinario": ini_ext.date().isoformat(),
+            "data_fim_extraordinario": fim_ext.date().isoformat(),
+            "data_pagamento": None,
+            "status": "pendente",
+            "modalidade_pi": modalidade,
+        })
+    return cronograma
+
+
+def adicionar_patente(numero: str, data_dep: str, data_conc: Optional[str], **kwargs) -> Tuple[bool, str]:
+    try:
+        dados = {"numero": numero, "data_dep": data_dep, "data_conc": data_conc, **kwargs}
+        _request("POST", _endpoint(), headers=_headers("return=minimal"), json=_payload_patente(dados))
+        return True, "PI cadastrada com sucesso no Supabase"
+    except Exception as exc:
+        return False, f"Erro ao cadastrar PI: {exc}"
+
+
+def atualizar_patente(patente_id: Any, **dados: Any) -> Tuple[bool, str]:
+    try:
+        _request("PATCH", _patente_url(patente_id), headers=_headers("return=minimal"), json=_payload_patente(dados))
+        return True, "PI atualizada com sucesso no Supabase"
+    except Exception as exc:
+        return False, f"Erro ao atualizar PI: {exc}"
+
+
+def salvar_patente_importada(dados: Dict[str, Any]) -> Tuple[bool, str]:
+    try:
+        numero = quote(str(dados["numero"]), safe="")
+        col_numero = "pedido" if "pedido" in _COLUNAS_DISPONIVEIS else "numero_patente"
+        existente = _request("GET", f"{_endpoint()}?select=id&{col_numero}=eq.{numero}&limit=1", headers=_headers())
+
+        payload = _payload_patente(dados)
+        if existente:
+            _request("PATCH", _patente_url(existente[0]["id"]), headers=_headers("return=minimal"), json=payload)
+            return True, "PI existente atualizada no Supabase"
+
+        _request("POST", _endpoint(), headers=_headers("return=minimal"), json=payload)
+        return True, "Nova PI importada para o Supabase"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def obter_anuidades(patente_id: Any) -> pd.DataFrame:
+    df = obter_patentes()
+    if df.empty:
+        return pd.DataFrame()
+
+    match = df[df["id"].astype(str) == str(patente_id)]
+    if match.empty:
+        return pd.DataFrame()
+
+    pi = match.iloc[0]
+    data_dep = pi.get("data_deposito")
+    if not data_dep:
+        return pd.DataFrame()
+
+    pagamentos = _calcular_cronograma(data_dep, pi.get("modalidade_pi"))
+
+    # Processa os overrides de pagamento salvos no banco
+    overrides_dict = {}
+    overrides = pi.get("pagamentos_override")
+    if overrides and not pd.isna(overrides):
+        try:
+            overrides_dict = json.loads(overrides) if isinstance(overrides, str) else overrides
+        except Exception:
+            pass
+
+    hoje = date.today()
+    for pgto in pagamentos:
+        pgto["patente_id"] = patente_id
+        num_str = str(pgto["numero_anuidade"])
+
+        if num_str in overrides_dict:
+            cov = overrides_dict[num_str]
+            pgto["status"] = cov.get("status", "pendente")
+            pgto["data_pagamento"] = cov.get("data_pagamento")
+        else:
+            if pgto.get("data_pagamento"):
+                pgto["status"] = "pago"
+            else:
+                try:
+                    pgto["status"] = "vermelho" if pd.to_datetime(pgto["data_fim_extraordinario"]).date() < hoje else "pendente"
+                except Exception:
+                    pgto["status"] = "pendente"
+
+    return pd.DataFrame(pagamentos)
+
+
+def atualizar_status_anuidade(
+    patente_id: Any,
+    numero_anuidade: int,
+    novo_status: str,
+    data_pagamento: Optional[str] = None,
+) -> None:
+    # 1. Recupera patentes para ler overrides existentes
+    df = obter_patentes()
+    match = df[df["id"].astype(str) == str(patente_id)]
+    if match.empty:
+        raise ValueError("Patente não encontrada.")
+    pi = match.iloc[0]
+
+    overrides = pi.get("pagamentos_override")
+    if not overrides or pd.isna(overrides):
+        overrides_dict = {}
+    else:
+        try:
+            overrides_dict = json.loads(overrides) if isinstance(overrides, str) else overrides
+        except Exception:
+            overrides_dict = {}
+
+    overrides_dict[str(numero_anuidade)] = {
+        "status": novo_status,
+        "data_pagamento": data_pagamento
     }
 
+    col_override = "pagamentos_override" if "pagamentos_override" in _COLUNAS_DISPONIVEIS else "pagamentos_override"
+    _request(
+        "PATCH",
+        _patente_url(patente_id),
+        headers=_headers("return=minimal"),
+        json={col_override: json.dumps(overrides_dict)},
+    )
 
-# ============================================================
-# ANÁLISE DE INCONSISTÊNCIAS
-# ============================================================
 
-def analisar_inconsistencias_excel(
-    arquivo
-) -> List[str]:
+def deletar_patente(patente_id: Any) -> None:
+    _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
 
-    problemas = []
 
+def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
+    resultados = []
     try:
-        df = pd.read_excel(arquivo)
-    except Exception as e:
-        return [
-            f"Não foi possível ler o Excel: {e}"
-        ]
+        df = pd.read_excel(arquivo_excel)
+    except Exception as exc:
+        return [("ERRO_GERAL", False, f"Falha ao ler a planilha: {exc}")]
 
-    if df.empty:
-        return ["A planilha está vazia."]
+    colunas = {_normalizar_texto(col): col for col in df.columns}
 
-    df = _normalizar_colunas_excel(df)
+    def campo(*nomes: str) -> Optional[str]:
+        for nome in nomes:
+            coluna = colunas.get(_normalizar_texto(nome))
+            if coluna is not None:
+                return coluna
+        return None
 
-    if "numero_patente" not in df.columns:
+    mapa = {
+        "id_externo": campo("id", "id externo", "id do sistema"),
+        "numero": campo("processo", "pedido", "numero_patente", "numero de patente", "patente"),
+        "data_dep": campo("deposito", "depósito", "data_deposito", "data do deposito"),
+        "data_conc": campo("data da concessao", "data da concessão", "data_concessao"),
+        "titulo": campo("titulo", "título"),
+        "descricao": campo("resumo", "descricao", "descrição"),
+        "inventores": campo("nome_inventores", "nome dos inventores", "inventores", "nome do inventor"),
+        "titular": campo("depositante_titular", "depositante/ titular", "depositante titular", "titular", "depositante"),
+        "gestor": campo("gestor"),
+        "status": campo("status do pedido", "status", "situacao", "situação"),
+        "campus": campo("campus"),
+        "atributos": campo("atributos", "atributo"),
+        "modalidade_pi": campo("modalidade de pi", "modalidade pi", "modalidade", "tipo"),
+        "ano": campo("ano"),
+        "data_publicacao": campo("datada publicacao", "datada publicação", "data da publicacao", "data publicacao"),
+        "data_exame": campo("data exame", "data_exame", "exame"),
+        "acordo_titularidade": campo("acordo de titularidade", "acordo titularidade"),
+        "procuracao": campo("procuracao", "procuração"),
+        "termo_cessao": campo("termo de cessao", "termo de cessão", "termo cessao"),
+        "ipc_classificacao": campo("ipc classificacao", "ipc classificação", "ipc- classificacao", "ipc"),
+    }
 
-        problemas.append(
-            "A planilha não possui uma coluna "
-            "identificando o número do pedido/patente."
-        )
+    for idx, row in df.iterrows():
+        numero = _valor_limpo(row.get(mapa["numero"])) if mapa["numero"] else None
+        data_dep = _parse_data(row.get(mapa["data_dep"])) if mapa["data_dep"] else None
+        if not numero or not data_dep:
+            resultados.append((str(numero or f"Linha {idx + 2}"), False, "Processo ou depósito ausente."))
+            continue
 
-    else:
+        ano_val = row.get(mapa["ano"]) if mapa["ano"] else None
+        try:
+            ano_val = int(float(ano_val)) if pd.notna(ano_val) else None
+        except Exception:
+            ano_val = None
 
-        vazios = df["numero_patente"].isna().sum()
+        dados = {
+            "numero": str(numero).strip(),
+            "data_dep": data_dep,
+            "data_conc": _parse_data(row.get(mapa["data_conc"])) if mapa["data_conc"] else None,
+            "descricao": _valor_limpo(row.get(mapa["descricao"])) if mapa["descricao"] else None,
+            "titular": _valor_limpo(row.get(mapa["titular"])) if mapa["titular"] else None,
+            "gestor": _valor_limpo(row.get(mapa["gestor"])) if mapa["gestor"] else None,
+            "status_patente": _normalizar_status(row.get(mapa["status"])) if mapa["status"] else "Ativo",
+            "titulo": _valor_limpo(row.get(mapa["titulo"])) if mapa["titulo"] else None,
+            "inventores": _valor_limpo(row.get(mapa["inventores"])) if mapa["inventores"] else None,
+            "campus": _valor_limpo(row.get(mapa["campus"])) if mapa["campus"] else None,
+            "atributos": _valor_limpo(row.get(mapa["atributos"])) if mapa["atributos"] else None,
+            "id_externo": _valor_limpo(row.get(mapa["id_externo"])) if mapa["id_externo"] else None,
+            "modalidade_pi": normalizar_modalidade(row.get(mapa["modalidade_pi"])) if mapa["modalidade_pi"] else "Patente",
+            "ano": ano_val,
+            "data_publicacao": _parse_data(row.get(mapa["data_publicacao"])) if mapa["data_publicacao"] else None,
+            "data_exame": _parse_data(row.get(mapa["data_exame"])) if mapa["data_exame"] else None,
+            "acordo_titularidade": _valor_limpo(row.get(mapa["acordo_titularidade"])) if mapa["acordo_titularidade"] else None,
+            "procuracao": _valor_limpo(row.get(mapa["procuracao"])) if mapa["procuracao"] else None,
+            "termo_cessao": _valor_limpo(row.get(mapa["termo_cessao"])) if mapa["termo_cessao"] else None,
+            "ipc_classificacao": _valor_limpo(row.get(mapa["ipc_classificacao"])) if mapa["ipc_classificacao"] else None,
+        }
+        ok, msg = salvar_patente_importada(dados)
+        resultados.append((dados["numero"], ok, msg))
 
-        vazios += (
-            df["numero_patente"]
-            .astype(str)
-            .str.strip()
-            .isin(["", "nan", "None"])
-            .sum()
-        )
+    return resultados
 
-        if vazios > 0:
 
-            problemas.append(
-                f"{vazios} linha(s) sem número do pedido/patente."
-            )
-
-        duplicados = (
-            df["numero_patente"]
-            .astype(str)
-            .str.strip()
-            .duplicated()
-            .sum()
-        )
-
-        if duplicados > 0:
-
-            problemas.append(
-                f"{duplicados} número(s) de pedido duplicado(s) "
-                "na planilha."
-            )
-
+def analisar_inconsistencias_excel(arquivo_excel) -> List[str]:
+    df = pd.read_excel(arquivo_excel)
+    colunas = {_normalizar_texto(col): col for col in df.columns}
+    problemas = []
+    if not any(c in colunas for c in ["processo", "pedido", "numero_patente", "patente"]):
+        problemas.append("Coluna obrigatória 'Processo' / 'Pedido' não foi encontrada.")
+    if not any(c in colunas for c in ["deposito", "data_deposito"]):
+        problemas.append("Coluna obrigatória 'Depósito' não foi encontrada.")
+    if not any(c in colunas for c in ["modalidade_de_pi", "modalidade_pi", "modalidade", "tipo"]):
+        problemas.append("Coluna 'Modalidade de PI' não encontrada; os registros serão tratados como Patente.")
     return problemas
-
-
-# ============================================================
-# FUNÇÕES DE COMPATIBILIDADE
-# ============================================================
-
-def inserir_patente(*args, **kwargs):
-    return adicionar_patente(*args, **kwargs)
-
-
-def atualizar_patente_por_id(*args, **kwargs):
-    return atualizar_patente(*args, **kwargs)
-
-
-def excluir_pi(patente_id):
-    return excluir_patente(patente_id)
