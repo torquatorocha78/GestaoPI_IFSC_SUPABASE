@@ -35,9 +35,14 @@ except Exception as exc:
 # FUNÇÕES AUXILIARES
 # ============================================================
 
-def text_clean(valor):
-    return "" if valor is None or pd.isna(valor) else str(valor)
-
+def ano_clean(valor):
+    """Retorna o ano como inteiro de forma segura, evitando erros com NaN/None."""
+    if valor is None or pd.isna(valor) or str(valor).strip() == "":
+        return datetime.now().year
+    try:
+        return int(float(valor))
+    except (ValueError, TypeError):
+        return datetime.now().year
 
 def status_pagamento(row):
     if row.get("status") == "nao_pagar":
