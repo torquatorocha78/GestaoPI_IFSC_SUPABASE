@@ -34,11 +34,11 @@ except Exception:
     SUPABASE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
 
 try:
-    SUPABASE_TABLE = str(st.secrets.get("SUPABASE_TABLE", "patentes")).strip() or "patentes"
+    SUPABASE_TABLE = str(st.secrets.get("SUPABASE_TABLE", "ativos_pi")).strip() or "ativos_pi"
 except Exception:
-    SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "patentes").strip() or "patentes"
+    SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "ativos_pi").strip() or "ativos_pi"
 
-SUPABASE_ANUIDADES_TABLE = "anuidades"
+SUPABASE_ANUIDADES_TABLE = "obrigacoes_financeiras"
 
 
 # ============================================================
@@ -208,7 +208,7 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     aliases = {
-        "numero_patente": ("numero_patente", "processo", "numero de patente", "patente"),
+        "numero_processo": ("numero_processo", "numero_patente", "processo", "numero de patente", "patente"),
         "data_deposito": ("data_deposito", "deposito", "depósito", "data do deposito"),
         "data_concessao": ("data_concessao", "data da concessao", "data da concessão"),
         "descricao": ("descricao", "descrição", "resumo"),
@@ -216,11 +216,11 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
         "gestor": ("gestor",),
         "status": ("status", "status do pedido", "situacao", "situação"),
         "titulo": ("titulo", "título"),
-        "inventores": ("inventores", "nome dos inventores", "nome do inventor"),
+        "inventores": ("inventores", "nome dos inventores", "nome do inventor", "nome dos inventores"),
         "campus": ("campus",),
         "atributos": ("atributos", "atributo"),
         "id_externo": ("id_externo", "id do sistema"),
-        "modalidade_pi": ("modalidade_pi", "modalidade de pi", "modalidade", "tipo"),
+        "tipo_pi": ("tipo_pi", "modalidade_pi", "modalidade de pi", "modalidade", "tipo"),
         "ano": ("ano",),
         "data_publicacao": ("data_publicacao", "data da publicacao", "data da publicação", "datada publicacao"),
         "data_exame": ("data_exame", "data exame", "exame"),
@@ -228,6 +228,7 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
         "procuracao": ("procuracao", "procuração"),
         "termo_cessao": ("termo_cessao", "termo de cessao", "termo de cessão"),
         "ipc_classificacao": ("ipc_classificacao", "ipc classificacao", "ipc classificação", "ipc"),
+        "linguagem": ("linguagem", "linguagem do software"),
     }
 
     for destino, nomes in aliases.items():
@@ -236,8 +237,18 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
         origem = _coluna_existente(df, *nomes)
         df[destino] = df[origem] if origem else None
 
-    df["modalidade_pi"] = df["modalidade_pi"].apply(normalizar_modalidade)
+    # Compatibilidade com o app antigo: mantém numero_patente e modalidade_pi
+    # como colunas derivadas para que as telas existentes continuem funcionando.
+    if "numero_patente" not in df.columns:
+        df["numero_patente"] = df["numero_processo"]
+
+    if "modalidade_pi" not in df.columns:
+        df["modalidade_pi"] = df["tipo_pi"]
+
+    df["tipo_pi"] = df["tipo_pi"].apply(normalizar_modalidade)
+    df["modalidade_pi"] = df["tipo_pi"]
     df["status"] = df["status"].apply(_normalizar_status)
+
     return df
 
 
@@ -265,11 +276,13 @@ def _patente_url(patente_id: Any) -> str:
 def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
     gestor = dados.get("gestor")
     status = _normalizar_status(dados.get("status_patente", dados.get("status")))
+    modalidade = normalizar_modalidade(dados.get("modalidade_pi", dados.get("tipo_pi")))
 
     payload = {
-        "numero_patente": dados.get("numero"),
-        "data_deposito": dados.get("data_dep"),
-        "data_concessao": dados.get("data_conc"),
+        "numero_processo": dados.get("numero"),
+        "tipo_pi": modalidade,
+        "data_deposito": _parse_data(dados.get("data_dep")),
+        "data_concessao": _parse_data(dados.get("data_conc")),
         "descricao": dados.get("descricao"),
         "titular": dados.get("titular"),
         "gestor": gestor,
@@ -278,19 +291,16 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
         "inventores": dados.get("inventores"),
         "campus": dados.get("campus"),
         "atributos": dados.get("atributos"),
-        "id_externo": dados.get("id_externo"),
-        "modalidade_pi": normalizar_modalidade(dados.get("modalidade_pi")),
-        "ano": dados.get("ano"),
-        "data_publicacao": dados.get("data_publicacao"),
-        "data_exame": dados.get("data_exame"),
         "acordo_titularidade": dados.get("acordo_titularidade"),
         "procuracao": dados.get("procuracao"),
         "termo_cessao": dados.get("termo_cessao"),
         "ipc_classificacao": dados.get("ipc_classificacao"),
+        "linguagem": dados.get("linguagem"),
+        "ano": dados.get("ano"),
+        "data_publicacao": _parse_data(dados.get("data_publicacao")),
+        "data_exame": _parse_data(dados.get("data_exame")),
     }
 
-    # O banco possui a coluna gerarada "pagar". Não enviamos o valor;
-    # o próprio Supabase calcula com gestor + status.
     return {chave: _valor_limpo(valor) for chave, valor in payload.items()}
 
 
@@ -302,31 +312,35 @@ def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, An
     modalidade = normalizar_modalidade(modalidade_pi)
 
     if modalidade == "Software":
-        itens = [(1, "Taxa única de depósito", 0)]
+        itens = [(1, "Registro de Software", 0, "Registro")]
     elif modalidade == "Desenho Industrial":
-        # Depósito + 4 quinquênios.
-        itens = [(1, "Taxa de depósito", 0)]
-        itens += [(i + 1, f"{i}º quinquênio", i * 5) for i in range(1, 5)]
+        itens = [(i, f"{i}º quinquênio - Desenho Industrial", i * 5, "Quinquenio") for i in range(1, 5)]
     else:
-        itens = [(i, f"{i}ª anuidade", i - 1) for i in range(1, 21)]
+        itens = [(i, f"{i}ª anuidade - Patente", i - 1, "Anuidade") for i in range(1, 21)]
 
     cronograma = []
-    for numero, descricao, anos in itens:
-        ini_ord = inicio + pd.DateOffset(years=anos)
-        fim_ord = ini_ord + pd.DateOffset(months=3)
-        ini_ext = fim_ord + pd.DateOffset(days=1)
-        fim_ext = ini_ext + pd.DateOffset(months=6)
+    for numero, descricao, anos, tipo_obrigacao in itens:
+        ini = inicio + pd.DateOffset(years=anos)
+
+        if tipo_obrigacao == "Anuidade":
+            venc = ini + pd.DateOffset(months=3)
+            inicio_extra = venc + pd.DateOffset(days=1)
+            fim_extra = inicio_extra + pd.DateOffset(months=6)
+        else:
+            venc = ini
+            inicio_extra = None
+            fim_extra = None
 
         cronograma.append({
-            "numero_anuidade": numero,
+            "numero_obrigacao": numero,
+            "tipo_obrigacao": tipo_obrigacao,
             "descricao_pagamento": descricao,
-            "data_inicio_ordinario": ini_ord.date().isoformat(),
-            "data_fim_ordinario": fim_ord.date().isoformat(),
-            "data_inicio_extraordinario": ini_ext.date().isoformat(),
-            "data_fim_extraordinario": fim_ext.date().isoformat(),
+            "data_inicio": ini.date().isoformat(),
+            "data_vencimento": venc.date().isoformat(),
+            "data_inicio_extraordinario": inicio_extra.date().isoformat() if inicio_extra is not None else None,
+            "data_fim_extraordinario": fim_extra.date().isoformat() if fim_extra is not None else None,
             "data_pagamento": None,
-            "status": "pendente",
-            "modalidade_pi": modalidade,
+            "status": "Pendente",
         })
 
     return cronograma
@@ -335,12 +349,12 @@ def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, An
 def _anuidades_patente_url(patente_id: Any) -> str:
     return (
         f"{_endpoint(SUPABASE_ANUIDADES_TABLE)}"
-        f"?patente_id=eq.{quote(str(patente_id), safe='')}"
+        f"?ativo_pi_id=eq.{quote(str(patente_id), safe='')}"
     )
 
 
 def _sincronizar_anuidades(patente_id: Any, data_dep: Any, modalidade_pi: Any) -> None:
-    """Cria/atualiza o cronograma na tabela anuidades sem apagar pagamentos já registrados."""
+    """Cria/atualiza obrigações financeiras sem apagar pagamentos registrados."""
     data_dep = _parse_data(data_dep)
     if not data_dep:
         return
@@ -352,28 +366,28 @@ def _sincronizar_anuidades(patente_id: Any, data_dep: Any, modalidade_pi: Any) -
         f"{_anuidades_patente_url(patente_id)}&select=*",
         headers=_headers(),
     ) or []
+
     existentes_por_numero = {
-        int(item["numero_anuidade"]): item
+        int(item["numero_obrigacao"]): item
         for item in existentes
-        if item.get("numero_anuidade") is not None
+        if item.get("numero_obrigacao") is not None
     }
 
     for item in cronograma:
-        numero = int(item["numero_anuidade"])
+        numero = int(item["numero_obrigacao"])
         existente = existentes_por_numero.get(numero)
 
         payload = {
-            "patente_id": patente_id,
-            "numero_anuidade": numero,
+            "ativo_pi_id": patente_id,
+            "tipo_obrigacao": item["tipo_obrigacao"],
+            "numero_obrigacao": numero,
             "descricao_pagamento": item["descricao_pagamento"],
-            "data_inicio_ordinario": item["data_inicio_ordinario"],
-            "data_fim_ordinario": item["data_fim_ordinario"],
+            "data_inicio": item["data_inicio"],
+            "data_vencimento": item["data_vencimento"],
             "data_inicio_extraordinario": item["data_inicio_extraordinario"],
             "data_fim_extraordinario": item["data_fim_extraordinario"],
-            "modalidade_pi": item["modalidade_pi"],
         }
 
-        # Não sobrescreve status/data de pagamento já registrados.
         if existente:
             _request(
                 "PATCH",
@@ -401,7 +415,7 @@ def garantir_pagamentos_existentes() -> None:
             _sincronizar_anuidades(
                 pi["id"],
                 pi.get("data_deposito"),
-                pi.get("modalidade_pi"),
+                pi.get("tipo_pi"),
             )
 
 
@@ -409,7 +423,7 @@ def _sincronizar_apos_salvar(patente_id: Any, dados: Dict[str, Any]) -> None:
     _sincronizar_anuidades(
         patente_id,
         dados.get("data_dep"),
-        dados.get("modalidade_pi"),
+        dados.get("tipo_pi"),
     )
 
 
@@ -468,7 +482,7 @@ def atualizar_patente(patente_id: Any, **dados: Any) -> Tuple[bool, str]:
         if not linha.empty:
             pi = linha.iloc[0]
             data_dep = dados.get("data_dep") or pi.get("data_deposito")
-            modalidade = dados.get("modalidade_pi") or pi.get("modalidade_pi")
+            modalidade = dados.get("tipo_pi") or pi.get("tipo_pi")
             _sincronizar_anuidades(patente_id, data_dep, modalidade)
 
         return True, "PI atualizada com sucesso no Supabase"
@@ -481,7 +495,7 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
         numero = quote(str(dados["numero"]), safe="")
         existente = _request(
             "GET",
-            f"{_endpoint()}?select=id&numero_patente=eq.{numero}&limit=1",
+            f"{_endpoint()}?select=id&numero_processo=eq.{numero}&limit=1",
             headers=_headers(),
         )
         payload = _payload_patente(dados)
@@ -497,7 +511,7 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
             _sincronizar_anuidades(
                 patente_id,
                 dados.get("data_dep"),
-                dados.get("modalidade_pi"),
+                dados.get("tipo_pi"),
             )
             return True, "PI existente atualizada no Supabase"
 
@@ -511,7 +525,7 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
         _sincronizar_anuidades(
             patente_id,
             dados.get("data_dep"),
-            dados.get("modalidade_pi"),
+            dados.get("tipo_pi"),
         )
         return True, "Nova PI importada para o Supabase"
     except Exception as exc:
@@ -522,34 +536,43 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
 # ANUIDADES / PAGAMENTOS
 # ============================================================
 def _status_calculado_anuidade(row: pd.Series) -> str:
-    if str(row.get("status", "")).lower() == "nao_pagar":
-        return "nao_pagar"
-    if row.get("data_pagamento") or str(row.get("status", "")).lower() == "pago":
-        return "pago"
+    status = _normalizar_texto(row.get("status", ""))
+
+    if status == "nao_pagar":
+        return "Não pagar"
+    if row.get("data_pagamento") or status == "pago":
+        return "Pago"
 
     hoje = date.today()
     try:
-        fim_extra = pd.to_datetime(row["data_fim_extraordinario"]).date()
-        inicio_ord = pd.to_datetime(row["data_inicio_ordinario"]).date()
-        fim_ord = pd.to_datetime(row["data_fim_ordinario"]).date()
-        inicio_extra = pd.to_datetime(row["data_inicio_extraordinario"]).date()
+        inicio_ord = pd.to_datetime(row["data_inicio"]).date()
+        fim_ord = pd.to_datetime(row["data_vencimento"]).date()
 
-        if hoje > fim_extra:
-            return "vermelho"
-        if inicio_extra <= hoje <= fim_extra:
-            return "extraordinario"
+        inicio_extra_raw = row.get("data_inicio_extraordinario")
+        fim_extra_raw = row.get("data_fim_extraordinario")
+
+        if inicio_extra_raw and fim_extra_raw:
+            inicio_extra = pd.to_datetime(inicio_extra_raw).date()
+            fim_extra = pd.to_datetime(fim_extra_raw).date()
+
+            if hoje > fim_extra:
+                return "Vencido"
+            if inicio_extra <= hoje <= fim_extra:
+                return "Extraordinário"
+
         if inicio_ord <= hoje <= fim_ord:
-            return "ordinario"
+            return "Pendente"
+
         if hoje < inicio_ord:
-            return "futuro"
+            return "Futuro"
     except Exception:
         pass
 
-    return "pendente"
+    return "Pendente"
 
 
 def obter_anuidades(patente_id: Any) -> pd.DataFrame:
-    """Busca o cronograma real salvo no Supabase."""
+    """Busca as obrigações financeiras reais salvas no Supabase."""
     df = obter_patentes()
     if df.empty:
         return pd.DataFrame()
@@ -560,25 +583,22 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
 
     pi = match.iloc[0]
     data_dep = pi.get("data_deposito")
-    modalidade = pi.get("modalidade_pi")
+    modalidade = pi.get("tipo_pi")
+
     if not data_dep:
         return pd.DataFrame()
 
-    # Se a PI ainda não tiver cronograma, cria automaticamente.
-    try:
-        registros = _request(
-            "GET",
-            f"{_anuidades_patente_url(patente_id)}&select=*&order=numero_anuidade.asc",
-            headers=_headers(),
-        ) or []
-    except Exception:
-        registros = []
+    registros = _request(
+        "GET",
+        f"{_anuidades_patente_url(patente_id)}&select=*&order=numero_obrigacao.asc",
+        headers=_headers(),
+    ) or []
 
     if not registros:
         _sincronizar_anuidades(patente_id, data_dep, modalidade)
         registros = _request(
             "GET",
-            f"{_anuidades_patente_url(patente_id)}&select=*&order=numero_anuidade.asc",
+            f"{_anuidades_patente_url(patente_id)}&select=*&order=numero_obrigacao.asc",
             headers=_headers(),
         ) or []
 
@@ -586,10 +606,12 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
     if resultado.empty:
         return resultado
 
-    # Regra de pagamento da PI.
+    # Compatibilidade com o app que usa "numero_anuidade".
+    resultado["numero_anuidade"] = resultado["numero_obrigacao"]
+
     pode_pagar = _deve_pagar(pi.get("gestor"), pi.get("status"))
     if not pode_pagar:
-        resultado["status"] = "nao_pagar"
+        resultado["status"] = "Não pagar"
     else:
         resultado["status"] = resultado.apply(_status_calculado_anuidade, axis=1)
 
@@ -602,46 +624,56 @@ def atualizar_status_anuidade(
     novo_status: str,
     data_pagamento: Optional[str] = None,
 ) -> None:
-    """Registra pagamento ou marca a anuidade como não pagar."""
-    status = _normalizar_texto(novo_status)
-    if status not in {"pago", "nao_pagar", "pendente"}:
+    """Registra pagamento ou marca a obrigação como não pagar."""
+    chave = _normalizar_texto(novo_status)
+
+    mapa = {
+        "pago": "Pago",
+        "nao_pagar": "Não pagar",
+        "nao pagar": "Não pagar",
+        "pendente": "Pendente",
+        "vencido": "Vencido",
+        "em_analise": "Em análise",
+        "cancelado": "Cancelado",
+    }
+
+    if chave not in mapa:
         raise ValueError("Status de pagamento inválido.")
 
+    status = mapa[chave]
     patente_id_q = quote(str(patente_id), safe="")
     numero_q = quote(str(int(numero_anuidade)), safe="")
 
-    # Confere se o registro existe.
     existente = _request(
         "GET",
-        f"{_endpoint(SUPABASE_ANUIDADES_TABLE)}?patente_id=eq.{patente_id_q}&numero_anuidade=eq.{numero_q}&limit=1",
+        f"{_endpoint(SUPABASE_ANUIDADES_TABLE)}?ativo_pi_id=eq.{patente_id_q}&numero_obrigacao=eq.{numero_q}&limit=1",
         headers=_headers(),
     ) or []
 
     if not existente:
-        # Cria o cronograma se ainda não existir.
         df = obter_patentes()
         match = df[df["id"].astype(str) == str(patente_id)] if not df.empty else pd.DataFrame()
         if match.empty:
             raise RuntimeError("PI não encontrada.")
+
         pi = match.iloc[0]
-        _sincronizar_anuidades(patente_id, pi.get("data_deposito"), pi.get("modalidade_pi"))
+        _sincronizar_anuidades(patente_id, pi.get("data_deposito"), pi.get("tipo_pi"))
+
         existente = _request(
             "GET",
-            f"{_endpoint(SUPABASE_ANUIDADES_TABLE)}?patente_id=eq.{patente_id_q}&numero_anuidade=eq.{numero_q}&limit=1",
+            f"{_endpoint(SUPABASE_ANUIDADES_TABLE)}?ativo_pi_id=eq.{patente_id_q}&numero_obrigacao=eq.{numero_q}&limit=1",
             headers=_headers(),
         ) or []
 
     if not existente:
-        raise RuntimeError("Pagamento/anuidade não encontrado para esta PI.")
+        raise RuntimeError("Obrigação financeira não encontrada para esta PI.")
 
     registro_id = existente[0]["id"]
     payload = {"status": status}
 
-    if status == "pago":
+    if status == "Pago":
         payload["data_pagamento"] = _parse_data(data_pagamento) or date.today().isoformat()
-    elif status == "nao_pagar":
-        payload["data_pagamento"] = None
-    elif status == "pendente":
+    elif status in {"Não pagar", "Pendente", "Vencido", "Cancelado"}:
         payload["data_pagamento"] = None
 
     _request(
@@ -681,7 +713,7 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
 
     mapa = {
         "id_externo": campo("id", "id externo", "id do sistema"),
-        "numero": campo("processo", "numero_patente", "numero de patente", "patente"),
+        "numero": campo("processo", "numero_processo", "numero de patente", "patente"),
         "data_dep": campo("deposito", "depósito", "data_deposito", "data do deposito"),
         "data_conc": campo("data da concessao", "data da concessão", "data_concessao"),
         "titulo": campo("titulo", "título"),
@@ -700,6 +732,7 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
         "procuracao": campo("procuracao", "procuração"),
         "termo_cessao": campo("termo de cessao", "termo de cessão", "termo cessao"),
         "ipc_classificacao": campo("ipc classificacao", "ipc classificação", "ipc- classificacao", "ipc"),
+        "linguagem": campo("linguagem", "linguagem do software"),
     }
 
     for idx, row in df.iterrows():
@@ -731,7 +764,7 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
             "campus": _valor_limpo(row.get(mapa["campus"])) if mapa["campus"] else None,
             "atributos": _valor_limpo(row.get(mapa["atributos"])) if mapa["atributos"] else None,
             "id_externo": _valor_limpo(row.get(mapa["id_externo"])) if mapa["id_externo"] else None,
-            "modalidade_pi": normalizar_modalidade(row.get(mapa["modalidade_pi"])) if mapa["modalidade_pi"] else "Patente",
+            "modalidade_pi": normalizar_modalidade(row.get(mapa["tipo_pi"])) if mapa["tipo_pi"] else "Patente",
             "ano": ano_val,
             "data_publicacao": _parse_data(row.get(mapa["data_publicacao"])) if mapa["data_publicacao"] else None,
             "data_exame": _parse_data(row.get(mapa["data_exame"])) if mapa["data_exame"] else None,
@@ -739,6 +772,7 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
             "procuracao": _valor_limpo(row.get(mapa["procuracao"])) if mapa["procuracao"] else None,
             "termo_cessao": _valor_limpo(row.get(mapa["termo_cessao"])) if mapa["termo_cessao"] else None,
             "ipc_classificacao": _valor_limpo(row.get(mapa["ipc_classificacao"])) if mapa["ipc_classificacao"] else None,
+            "linguagem": _valor_limpo(row.get(mapa["linguagem"])) if mapa.get("linguagem") else None,
         }
 
         ok, msg = salvar_patente_importada(dados)
@@ -752,7 +786,7 @@ def analisar_inconsistencias_excel(arquivo_excel) -> List[str]:
     colunas = {_normalizar_texto(col): col for col in df.columns}
     problemas = []
 
-    if not any(c in colunas for c in ["processo", "numero_patente", "patente"]):
+    if not any(c in colunas for c in ["processo", "numero_processo", "patente"]):
         problemas.append("Coluna obrigatória 'Processo' não foi encontrada.")
 
     if not any(c in colunas for c in ["deposito", "data_deposito"]):
@@ -764,4 +798,5 @@ def analisar_inconsistencias_excel(arquivo_excel) -> List[str]:
         )
 
     return problemas
+
 
