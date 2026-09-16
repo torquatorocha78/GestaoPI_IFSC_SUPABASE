@@ -15,16 +15,29 @@ import requests
 # https://xxxx.supabase.co
 # ou até https://xxxx.supabase.co/rest/v1/
 # O código abaixo corrige automaticamente o segundo caso.
-SUPABASE_URL = os.getenv(
-    "SUPABASE_URL",
-    "https://ptxtclyfwlcwqgwzqieu.supabase.co",
-).rstrip("/")
+# Streamlit Cloud disponibiliza os Secrets por st.secrets.
+# Mantemos os.getenv como fallback para execução local.
+try:
+    SUPABASE_URL = str(st.secrets["SUPABASE_URL"]).strip().rstrip("/")
+except Exception:
+    SUPABASE_URL = os.getenv(
+        "SUPABASE_URL",
+        "https://ptxtclyfwlcwqgwzqieu.supabase.co",
+    ).strip().rstrip("/")
 
 if SUPABASE_URL.endswith("/rest/v1"):
     SUPABASE_URL = SUPABASE_URL[:-len("/rest/v1")].rstrip("/")
 
-SUPABASE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
-SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "patentes")
+try:
+    SUPABASE_KEY = str(st.secrets["SUPABASE_PUBLISHABLE_KEY"]).strip()
+except Exception:
+    SUPABASE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+
+try:
+    SUPABASE_TABLE = str(st.secrets.get("SUPABASE_TABLE", "patentes")).strip() or "patentes"
+except Exception:
+    SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "patentes").strip() or "patentes"
+
 SUPABASE_ANUIDADES_TABLE = "anuidades"
 
 
@@ -751,3 +764,4 @@ def analisar_inconsistencias_excel(arquivo_excel) -> List[str]:
         )
 
     return problemas
+
