@@ -1,18 +1,8 @@
--- ============================================================
 -- MIGRATION: Fix data_inicio_extraordinario calculation
--- 
--- Issue: SQL was calculating data_inicio_extraordinario
---        without +1 day, but Python adds +1 day.
---
--- This migration:
--- 1. Updates existing records to add +1 day
--- 2. Fixes the stored procedure to match Python logic
--- ============================================================
+-- Issue: SQL calculated data_inicio_extraordinario without +1 day
+-- Python adds +1 day, so we need to align SQL with Python logic
 
--- ============================================================
--- 1. UPDATE EXISTING RECORDS
--- ============================================================
--- For Anuidades (Patentes), add 1 day to data_inicio_extraordinario
+-- Step 1: Update existing records
 UPDATE obrigacoes_financeiras
 SET 
     data_inicio_extraordinario = data_vencimento + INTERVAL '1 day',
@@ -23,10 +13,7 @@ WHERE tipo_obrigacao = 'Anuidade'
   AND data_vencimento IS NOT NULL
   AND data_inicio_extraordinario = data_vencimento;
 
-
--- ============================================================
--- 2. FIX STORED PROCEDURE: gerar_obrigacoes_pi()
--- ============================================================
+-- Step 2: Fix stored procedure
 CREATE OR REPLACE FUNCTION gerar_obrigacoes_pi(
     p_ativo_pi_id bigint
 )
@@ -41,15 +28,10 @@ DECLARE
     v_vencimento date;
     v_inicio_extraordinario date;
     v_fim_extraordinario date;
-
 BEGIN
-    -- Busca o ativo
-    SELECT
-        tipo_pi,
-        data_deposito
-    INTO
-        v_tipo,
-        v_data_deposito
+
+    SELECT tipo_pi, data_deposito
+    INTO v_tipo, v_data_deposito
     FROM ativos_pi
     WHERE id = p_ativo_pi_id;
 
@@ -57,9 +39,6 @@ BEGIN
         RAISE EXCEPTION 'Ativo de PI não encontrado: %', p_ativo_pi_id;
     END IF;
 
-    -- ========================================================
-    -- PATENTE: 20 anuidades
-    -- ========================================================
     IF v_tipo = 'Patente' THEN
         DELETE FROM obrigacoes_financeiras
         WHERE ativo_pi_id = p_ativo_pi_id;
@@ -94,9 +73,6 @@ BEGIN
             );
         END LOOP;
 
-    -- ========================================================
-    -- DESENHO INDUSTRIAL: 4 quinquênios
-    -- ========================================================
     ELSIF v_tipo = 'Desenho Industrial' THEN
         DELETE FROM obrigacoes_financeiras
         WHERE ativo_pi_id = p_ativo_pi_id;
@@ -125,9 +101,6 @@ BEGIN
             );
         END LOOP;
 
-    -- ========================================================
-    -- SOFTWARE: 1 registro
-    -- ========================================================
     ELSIF v_tipo = 'Software' THEN
         DELETE FROM obrigacoes_financeiras
         WHERE ativo_pi_id = p_ativo_pi_id;
@@ -155,10 +128,7 @@ BEGIN
 END;
 $$;
 
-
--- ============================================================
--- 3. REGENERATE ALL OBLIGATIONS (to apply the fix)
--- ============================================================
+-- Step 3: Regenerate all obligations
 DO $$
 DECLARE
     r record;
@@ -171,26 +141,3 @@ BEGIN
         PERFORM gerar_obrigacoes_pi(r.id);
     END LOOP;
 END $$;
-
-
--- ============================================================
--- 4. VERIFICATION QUERY
--- ============================================================
--- Run this to verify the fix:
--- 
--- SELECT
---     a.numero_processo,
---     a.tipo_pi,
---     o.numero_obrigacao,
---     o.descricao_pagamento,
---     o.data_vencimento,
---     o.data_inicio_extraordinario,
---     o.data_fim_extraordinario,
---     (o.data_inicio_extraordinario - o.data_vencimento) as dias_diferenca
--- FROM obrigacoes_financeiras o
--- JOIN ativos_pi a ON a.id = o.ativo_pi_id
--- WHERE a.tipo_pi = 'Patente'
--- ORDER BY a.numero_processo, o.numero_obrigacao;
--- 
--- Expected: data_inicio_extraordinario should be 1 day AFTER data_vencimento
--- ============================================================
