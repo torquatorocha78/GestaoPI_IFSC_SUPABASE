@@ -217,7 +217,10 @@ elif pagina == "➕ Adicionar PI":
                     termo_cessao=termo_cessao,
                     ipc_classificacao=ipc_classificacao,
                 )
-                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
 elif pagina == "📁 Gerenciar PIs":
     st.title("📁 Gerenciar Propriedades Intelectuais")
