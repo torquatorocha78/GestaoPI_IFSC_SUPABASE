@@ -1114,19 +1114,22 @@ def salvar_patente_importada(
 def _status_calculado_anuidade(
     row: pd.Series
 ) -> str:
-
+    """
+    Retorna os estados em formato padronizado (minúsculas)
+    para manter compatibilidade com o front-end e utils.py.
+    """
     status = _normalizar_texto(
         row.get("status", "")
     )
 
-    if status == "nao_pagar":
-        return "Não pagar"
+    if status in {"nao_pagar", "nao pagar", "não pagar", "não_pagar"}:
+        return "nao_pagar"
 
     if (
         row.get("data_pagamento")
         or status == "pago"
     ):
-        return "Pago"
+        return "pago"
 
     hoje = date.today()
 
@@ -1170,35 +1173,38 @@ def _status_calculado_anuidade(
             )
 
             if hoje > fim_extra:
-                return "Vencido"
+                return "vermelho"
 
             if (
                 inicio_extra
                 <= hoje
                 <= fim_extra
             ):
-                return "Extraordinário"
+                return "extraordinario"
 
         if (
             inicio_ord
             <= hoje
             <= fim_ord
         ):
-            return "Pendente"
+            return "pendente"
 
         if hoje < inicio_ord:
-            return "Futuro"
+            return "futuro"
 
     except Exception:
         pass
 
-    return "Pendente"
+    return "pendente"
 
 
 def obter_anuidades(
     patente_id: Any
 ) -> pd.DataFrame:
-
+    """
+    Obtém as obrigações financeiras da PI e cria aliases de compatibilidade
+    com o modelo de dados anterior (SQLite/Front-end).
+    """
     df = obter_patentes()
 
     if df.empty:
@@ -1256,9 +1262,19 @@ def obter_anuidades(
     if resultado.empty:
         return resultado
 
+    # ============================================================
+    # CAMADA DE COMPATIBILIDADE DE COLUNAS (SQLite -> Supabase)
+    # ============================================================
     resultado["numero_anuidade"] = (
         resultado["numero_obrigacao"]
     )
+    resultado["data_inicio_ordinario"] = resultado["data_inicio"]
+    resultado["data_fim_ordinario"] = resultado["data_vencimento"]
+
+    if "ativo_pi_id" in resultado.columns:
+        resultado["patente_id"] = resultado["ativo_pi_id"]
+
+    resultado["modalidade_pi"] = pi.get("tipo_pi")
 
     pode_pagar = _deve_pagar(
         pi.get("gestor"),
@@ -1268,7 +1284,7 @@ def obter_anuidades(
     if not pode_pagar:
 
         resultado["status"] = (
-            "Não pagar"
+            "nao_pagar"
         )
 
     else:
@@ -1429,19 +1445,6 @@ def importar_ativos_lote(
     """
     Importa uma lista de ativos de PI diretamente para
     a tabela 'ativos_pi'.
-
-    A coluna numero_processo é utilizada como chave de
-    conflito.
-
-    Se o processo já existir:
-        UPDATE
-
-    Se o processo não existir:
-        INSERT
-
-    Para novos registros, o trigger do PostgreSQL gera
-    automaticamente as obrigações financeiras na tabela
-    obrigacoes_financeiras.
     """
 
     if not lista_ativos:
@@ -1454,10 +1457,6 @@ def importar_ativos_lote(
     try:
 
         registros = []
-
-        # ====================================================
-        # VALIDAR E PREPARAR TODOS OS REGISTROS
-        # ====================================================
 
         for indice, ativo in enumerate(
             lista_ativos,
@@ -1489,10 +1488,6 @@ def importar_ativos_lote(
                 ativo.get("data_deposito")
             )
 
-            # ================================================
-            # PROCESSO OBRIGATÓRIO
-            # ================================================
-
             if not numero_processo:
 
                 return (
@@ -1500,10 +1495,6 @@ def importar_ativos_lote(
                     f"Registro {indice}: "
                     "número do processo não informado."
                 )
-
-            # ================================================
-            # DATA DE DEPÓSITO OBRIGATÓRIA
-            # ================================================
 
             if not data_deposito:
 
@@ -1514,10 +1505,6 @@ def importar_ativos_lote(
                     "data de depósito não informada "
                     "ou inválida."
                 )
-
-            # ================================================
-            # LINGUAGEM OBRIGATÓRIA PARA SOFTWARE
-            # ================================================
 
             linguagem = _valor_limpo(
                 ativo.get("linguagem")
@@ -1535,10 +1522,6 @@ def importar_ativos_lote(
                     "a linguagem é obrigatória "
                     "para Software."
                 )
-
-            # ================================================
-            # MONTAGEM DO REGISTRO
-            # ================================================
 
             registro = {
 
@@ -1651,10 +1634,6 @@ def importar_ativos_lote(
                     ),
             }
 
-            # ================================================
-            # NORMALIZAÇÃO DO ANO
-            # ================================================
-
             if registro["ano"] is not None:
 
                 try:
@@ -1672,21 +1651,6 @@ def importar_ativos_lote(
             registros.append(
                 registro
             )
-
-        # ====================================================
-        # UPSERT NO SUPABASE
-        # ====================================================
-        #
-        # A tabela ativos_pi possui:
-        #
-        # UNIQUE(numero_processo)
-        #
-        # Portanto:
-        #
-        # processo novo    -> INSERT
-        # processo existente -> UPDATE
-        #
-        # ====================================================
 
         url = (
             f"{_endpoint()}"
