@@ -376,20 +376,457 @@ elif pagina == "📁 Gerenciar PIs":
                 st.rerun()
 
 elif pagina == "📤 Importar Excel":
-    st.title("📤 Importar Propriedades Intelectuais do Excel")
-    arquivo_excel = st.file_uploader("Selecione um arquivo Excel (.xlsx)", type="xlsx")
-    if arquivo_excel:
-        problemas = db.analisar_inconsistencias_excel(arquivo_excel)
-        if problemas:
-            for problema in problemas:
-                st.warning(problema)
-        else:
-            st.success("Estrutura da planilha verificada com sucesso.")
-        arquivo_excel.seek(0)
-        if st.button("📥 Importar Dados", use_container_width=True, type="primary"):
-            resultados = db.importar_excel(arquivo_excel)
-            df_resultados = pd.DataFrame(resultados, columns=["Processo", "Sucesso", "Mensagem"])
-            st.dataframe(df_resultados, use_container_width=True, hide_index=True)
+    st.title("📥 Importar Ativos de PI via Planilha")
+
+    st.markdown("""
+    Esta ferramenta permite importar múltiplas Propriedades Intelectuais
+    diretamente de uma planilha Excel.
+
+    **Tipos aceitos:**
+    - Patente
+    - Software
+    - Desenho Industrial
+
+    As obrigações financeiras serão geradas automaticamente pelo banco
+    após a importação.
+    """)
+
+    arquivo_excel = st.file_uploader(
+        "Selecione a planilha (.xls ou .xlsx)",
+        type=["xls", "xlsx"],
+        key="importacao_pi"
+    )
+
+    if arquivo_excel is not None:
+
+        try:
+            df_excel = pd.read_excel(arquivo_excel)
+
+            if df_excel.empty:
+                st.warning("A planilha está vazia.")
+                st.stop()
+
+            st.success(
+                f"Planilha carregada com sucesso: "
+                f"{len(df_excel)} registro(s) encontrado(s)."
+            )
+
+            st.subheader("👀 Pré-visualização")
+
+            st.dataframe(
+                df_excel.head(10),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            colunas = df_excel.columns.tolist()
+
+            st.divider()
+            st.subheader("🔗 Mapeamento das Colunas")
+
+            st.info(
+                "Selecione qual coluna da sua planilha corresponde a cada "
+                "campo do sistema."
+            )
+
+            def encontrar_coluna(possibilidades):
+                """
+                Tenta encontrar automaticamente uma coluna da planilha.
+                """
+                for coluna in colunas:
+                    coluna_norm = (
+                        str(coluna)
+                        .strip()
+                        .lower()
+                        .replace("_", " ")
+                    )
+
+                    for termo in possibilidades:
+                        if termo in coluna_norm:
+                            return coluna
+
+                return colunas[0]
+
+            with st.expander(
+                "⚙️ Configurar mapeamento das colunas",
+                expanded=True
+            ):
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    col_tipo = st.selectbox(
+                        "Tipo de PI *",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "tipo pi",
+                                "tipo",
+                                "modalidade",
+                                "modalidade pi"
+                            ])
+                        )
+                    )
+
+                    col_processo = st.selectbox(
+                        "Número do Processo *",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "número do processo",
+                                "numero do processo",
+                                "numero processo",
+                                "numero patente",
+                                "processo"
+                            ])
+                        )
+                    )
+
+                    col_titulo = st.selectbox(
+                        "Título",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "título",
+                                "titulo"
+                            ])
+                        )
+                    )
+
+                    col_deposito = st.selectbox(
+                        "Data de Depósito *",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "data de depósito",
+                                "data de deposito",
+                                "depósito",
+                                "deposito"
+                            ])
+                        )
+                    )
+
+                    col_linguagem = st.selectbox(
+                        "Linguagem",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "linguagem",
+                                "linguagem do software"
+                            ])
+                        )
+                    )
+
+                with col2:
+
+                    col_campus = st.selectbox(
+                        "Campus",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "campus"
+                            ])
+                        )
+                    )
+
+                    col_gestor = st.selectbox(
+                        "Gestor",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "gestor"
+                            ])
+                        )
+                    )
+
+                    col_status = st.selectbox(
+                        "Status",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "status"
+                            ])
+                        )
+                    )
+
+                    col_titular = st.selectbox(
+                        "Titular / Depositante",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "titular",
+                                "depositante"
+                            ])
+                        )
+                    )
+
+                    col_inventores = st.selectbox(
+                        "Inventores",
+                        colunas,
+                        index=colunas.index(
+                            encontrar_coluna([
+                                "inventores",
+                                "inventor"
+                            ])
+                        )
+                    )
+
+            st.divider()
+
+            if st.button(
+                "📥 Confirmar e Processar Importação",
+                type="primary",
+                use_container_width=True
+            ):
+
+                ativos_para_salvar = []
+                erros_validacao = []
+
+                with st.spinner(
+                    "Validando e preparando os dados..."
+                ):
+
+                    for index, row in df_excel.iterrows():
+
+                        linha_excel = index + 2
+
+                        # ==========================================
+                        # FUNÇÃO AUXILIAR PARA VALORES
+                        # ==========================================
+
+                        def valor_limpo(coluna):
+                            valor = row.get(coluna)
+
+                            if pd.isna(valor):
+                                return None
+
+                            valor = str(valor).strip()
+
+                            if not valor or valor.lower() == "nan":
+                                return None
+
+                            return valor
+
+                        # ==========================================
+                        # TIPO DE PI
+                        # ==========================================
+
+                        tipo_original = valor_limpo(col_tipo)
+
+                        if not tipo_original:
+                            erros_validacao.append(
+                                f"Linha {linha_excel}: "
+                                "Tipo de PI não informado."
+                            )
+                            continue
+
+                        tipo_normalizado = (
+                            tipo_original
+                            .strip()
+                            .lower()
+                            .replace("_", " ")
+                        )
+
+                        if "software" in tipo_normalizado:
+                            tipo_pi = "Software"
+
+                        elif "desenho" in tipo_normalizado:
+                            tipo_pi = "Desenho Industrial"
+
+                        elif "patente" in tipo_normalizado:
+                            tipo_pi = "Patente"
+
+                        else:
+                            erros_validacao.append(
+                                f"Linha {linha_excel}: "
+                                f"Tipo de PI '{tipo_original}' inválido."
+                            )
+                            continue
+
+                        # ==========================================
+                        # PROCESSO
+                        # ==========================================
+
+                        numero_processo = valor_limpo(col_processo)
+
+                        if not numero_processo:
+                            erros_validacao.append(
+                                f"Linha {linha_excel}: "
+                                "Número do processo não informado."
+                            )
+                            continue
+
+                        # ==========================================
+                        # DATA DE DEPÓSITO
+                        # ==========================================
+
+                        valor_data = row.get(col_deposito)
+
+                        if pd.isna(valor_data):
+                            erros_validacao.append(
+                                f"Linha {linha_excel}: "
+                                "Data de depósito não informada."
+                            )
+                            continue
+
+                        try:
+
+                            data_deposito = pd.to_datetime(
+                                valor_data,
+                                dayfirst=True,
+                                errors="raise"
+                            ).strftime("%Y-%m-%d")
+
+                        except Exception:
+
+                            erros_validacao.append(
+                                f"Linha {linha_excel}: "
+                                f"Data de depósito inválida: "
+                                f"'{valor_data}'."
+                            )
+                            continue
+
+                        # ==========================================
+                        # LINGUAGEM
+                        # ==========================================
+
+                        linguagem = valor_limpo(col_linguagem)
+
+                        if tipo_pi == "Software" and not linguagem:
+
+                            erros_validacao.append(
+                                f"Linha {linha_excel}: "
+                                "Para Software, a Linguagem é obrigatória."
+                            )
+                            continue
+
+                        # ==========================================
+                        # DEMAIS CAMPOS
+                        # ==========================================
+
+                        titulo = valor_limpo(col_titulo)
+                        campus = valor_limpo(col_campus)
+                        gestor = valor_limpo(col_gestor)
+                        titular = valor_limpo(col_titular)
+                        inventores = valor_limpo(col_inventores)
+                        status = valor_limpo(col_status)
+
+                        if not status:
+                            status = "Ativo"
+
+                        if not campus:
+                            campus = None
+
+                        # ==========================================
+                        # MONTA REGISTRO
+                        # ==========================================
+
+                        ativo = {
+                            "tipo_pi": tipo_pi,
+                            "numero_processo": numero_processo,
+                            "titulo": titulo,
+                            "campus": campus,
+                            "status": status,
+                            "data_deposito": data_deposito,
+                            "gestor": gestor,
+                            "titular": titular,
+                            "inventores": inventores,
+                            "linguagem": (
+                                linguagem
+                                if tipo_pi == "Software"
+                                else None
+                            ),
+                        }
+
+                        ativos_para_salvar.append(ativo)
+
+                # ==================================================
+                # MOSTRA RESULTADO DA VALIDAÇÃO
+                # ==================================================
+
+                if erros_validacao:
+
+                    st.error(
+                        f"❌ Foram encontrados "
+                        f"{len(erros_validacao)} problema(s)."
+                    )
+
+                    for erro in erros_validacao[:20]:
+                        st.warning(erro)
+
+                    if len(erros_validacao) > 20:
+                        st.info(
+                            f"... e mais "
+                            f"{len(erros_validacao) - 20} problema(s)."
+                        )
+
+                # ==================================================
+                # IMPORTAÇÃO
+                # ==================================================
+
+                elif not ativos_para_salvar:
+
+                    st.warning(
+                        "Nenhum registro válido foi encontrado "
+                        "na planilha."
+                    )
+
+                else:
+
+                    st.info(
+                        f"📦 {len(ativos_para_salvar)} registro(s) "
+                        "pronto(s) para importação."
+                    )
+
+                    with st.expander(
+                        "🔎 Conferir dados que serão importados"
+                    ):
+
+                        st.dataframe(
+                            pd.DataFrame(ativos_para_salvar),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                    with st.spinner(
+                        "Salvando dados no Supabase..."
+                    ):
+
+                        try:
+
+                            resultados = db.importar_ativos_lote(
+                                ativos_para_salvar
+                            )
+
+                            if resultados.get("sucesso"):
+
+                                st.success(
+                                    resultados["mensagem"]
+                                )
+
+                                st.balloons()
+
+                            else:
+
+                                st.error(
+                                    resultados.get(
+                                        "mensagem",
+                                        "Erro durante a importação."
+                                    )
+                                )
+
+                        except Exception as exc:
+
+                            st.error(
+                                f"❌ Erro ao importar dados: {exc}"
+                            )
+
+        except Exception as exc:
+
+            st.error(
+                f"❌ Erro ao ler a planilha: {exc}"
+            )
 
 elif pagina == "🤖 Análise IA":
     st.title("🤖 Análise Inteligente de PI")
