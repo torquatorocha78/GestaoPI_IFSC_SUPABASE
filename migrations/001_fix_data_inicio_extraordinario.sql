@@ -15,15 +15,8 @@
 -- For Anuidades (Patentes), add 1 day to data_inicio_extraordinario
 UPDATE obrigacoes_financeiras
 SET 
-    data_inicio_extraordinario = 
-        CASE 
-            WHEN tipo_obrigacao = 'Anuidade' 
-                 AND data_inicio_extraordinario IS NOT NULL
-                 AND data_vencimento IS NOT NULL
-                 AND data_inicio_extraordinario = data_vencimento
-            THEN data_vencimento + INTERVAL '1 day'
-            ELSE data_inicio_extraordinario
-        END,
+    data_inicio_extraordinario = data_vencimento + INTERVAL '1 day',
+    data_fim_extraordinario = data_vencimento + INTERVAL '1 day' + INTERVAL '3 months',
     atualizado_em = now()
 WHERE tipo_obrigacao = 'Anuidade'
   AND data_inicio_extraordinario IS NOT NULL
@@ -46,6 +39,8 @@ DECLARE
     i integer;
     v_inicio date;
     v_vencimento date;
+    v_inicio_extraordinario date;
+    v_fim_extraordinario date;
 
 BEGIN
     -- Busca o ativo
@@ -66,13 +61,14 @@ BEGIN
     -- PATENTE: 20 anuidades
     -- ========================================================
     IF v_tipo = 'Patente' THEN
-        -- Evita duplicação
         DELETE FROM obrigacoes_financeiras
         WHERE ativo_pi_id = p_ativo_pi_id;
 
         FOR i IN 1..20 LOOP
             v_inicio := v_data_deposito + make_interval(years => i - 1);
             v_vencimento := v_inicio + INTERVAL '3 months';
+            v_inicio_extraordinario := v_vencimento + INTERVAL '1 day';
+            v_fim_extraordinario := v_vencimento + INTERVAL '1 day' + INTERVAL '3 months';
 
             INSERT INTO obrigacoes_financeiras (
                 ativo_pi_id,
@@ -92,8 +88,8 @@ BEGIN
                 'Anuidade ' || i || ' - Patente',
                 v_inicio,
                 v_vencimento,
-                v_vencimento + INTERVAL '1 day',  -- ← FIX: +1 day (aligned with Python)
-                v_vencimento + INTERVAL '1 day' + INTERVAL '3 months',
+                v_inicio_extraordinario,
+                v_fim_extraordinario,
                 'Pendente'
             );
         END LOOP;
@@ -163,7 +159,6 @@ $$;
 -- ============================================================
 -- 3. REGENERATE ALL OBLIGATIONS (to apply the fix)
 -- ============================================================
--- This will recalculate all existing obligations with the corrected logic
 DO $$
 DECLARE
     r record;
@@ -182,6 +177,7 @@ END $$;
 -- 4. VERIFICATION QUERY
 -- ============================================================
 -- Run this to verify the fix:
+-- 
 -- SELECT
 --     a.numero_processo,
 --     a.tipo_pi,
