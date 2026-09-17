@@ -792,13 +792,29 @@ elif pagina == "📁 Gerenciar PIs":
                         ),
                     )
 
+                    # Ano pode vir do Supabase como texto, float,
+                    # NaN ou valor inválido. Normalizamos antes de usar
+                    # int() para evitar ValueError no Streamlit.
+                    ano_pi = pi.get("ano")
+
+                    try:
+                        if (
+                            ano_pi is None
+                            or pd.isna(ano_pi)
+                            or str(ano_pi).strip() == ""
+                        ):
+                            ano_inicial = datetime.now().year
+                        else:
+                            ano_inicial = int(float(ano_pi))
+                    except (ValueError, TypeError):
+                        ano_inicial = datetime.now().year
+
                     edit_ano = st.number_input(
                         "Ano",
-                        value=(
-                            int(pi.get("ano"))
-                            if pi.get("ano")
-                            else datetime.now().year
-                        ),
+                        min_value=1990,
+                        max_value=2100,
+                        value=ano_inicial,
+                        step=1,
                     )
 
                 with col_b:
