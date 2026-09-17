@@ -1214,28 +1214,63 @@ elif pagina == "📤 Importar Excel":
 
             st.info(
                 "Selecione qual coluna da sua planilha "
-                "corresponde a cada campo do sistema."
+                "corresponde a cada campo do sistema. "
+                "Campos opcionais podem ser definidos como "
+                "“— Não importar —”."
             )
 
-            def encontrar_coluna(
-                possibilidades
-            ):
+            # ------------------------------------------------
+            # MAPEAMENTO SEGURO DAS COLUNAS
+            # ------------------------------------------------
 
-                for coluna in colunas:
+            # A planilha pode ter nomes diferentes para as mesmas
+            # informações. O mapeamento abaixo trabalha pelo índice
+            # da coluna e nunca usa list.index(), evitando o erro:
+            # "list.index(x): x not in list".
 
-                    coluna_norm = (
-                        str(coluna)
-                        .strip()
-                        .lower()
-                        .replace("_", " ")
-                    )
+            def normalizar_nome_coluna(valor):
+                return (
+                    str(valor)
+                    .strip()
+                    .lower()
+                    .replace("_", " ")
+                    .replace("-", " ")
+                )
+
+            def encontrar_indice_coluna(possibilidades):
+                """
+                Localiza a primeira coluna cujo nome contenha
+                uma das possibilidades informadas.
+                Retorna 0 se nenhuma for encontrada.
+                """
+                for indice, coluna in enumerate(colunas):
+                    coluna_norm = normalizar_nome_coluna(coluna)
 
                     for termo in possibilidades:
+                        termo_norm = normalizar_nome_coluna(termo)
 
-                        if termo in coluna_norm:
-                            return coluna
+                        if termo_norm and termo_norm in coluna_norm:
+                            return indice
 
-                return colunas[0]
+                return 0
+
+            # Campo opcional: permite não importar quando a coluna
+            # não existe na planilha.
+            OPCAO_NAO_IMPORTAR = "— Não importar —"
+            colunas_opcionais = [OPCAO_NAO_IMPORTAR] + colunas
+
+            def encontrar_indice_opcional(possibilidades):
+                for indice, coluna in enumerate(colunas):
+                    coluna_norm = normalizar_nome_coluna(coluna)
+
+                    for termo in possibilidades:
+                        termo_norm = normalizar_nome_coluna(termo)
+
+                        if termo_norm and termo_norm in coluna_norm:
+                            # +1 porque a primeira opção é "Não importar"
+                            return indice + 1
+
+                return 0
 
             with st.expander(
                 "⚙️ Configurar mapeamento das colunas",
@@ -1253,73 +1288,70 @@ elif pagina == "📤 Importar Excel":
                     col_tipo = st.selectbox(
                         "Tipo de PI *",
                         colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                [
-                                    "tipo pi",
-                                    "tipo",
-                                    "modalidade",
-                                    "modalidade pi",
-                                ]
-                            )
+                        index=encontrar_indice_coluna(
+                            [
+                                "tipo pi",
+                                "tipo",
+                                "modalidade pi",
+                                "modalidade",
+                            ]
                         ),
+                        key="map_tipo",
                     )
 
                     col_processo = st.selectbox(
                         "Número do Processo *",
                         colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                [
-                                    "número do processo",
-                                    "numero do processo",
-                                    "numero processo",
-                                    "numero patente",
-                                    "processo",
-                                ]
-                            )
+                        index=encontrar_indice_coluna(
+                            [
+                                "número do processo",
+                                "numero do processo",
+                                "numero processo",
+                                "numero patente",
+                                "pedido",
+                                "processo",
+                            ]
                         ),
+                        key="map_processo",
                     )
 
                     col_titulo = st.selectbox(
                         "Título",
                         colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                [
-                                    "título",
-                                    "titulo",
-                                ]
-                            )
+                        index=encontrar_indice_coluna(
+                            [
+                                "título",
+                                "titulo",
+                            ]
                         ),
+                        key="map_titulo",
                     )
 
                     col_deposito = st.selectbox(
                         "Data de Depósito *",
                         colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                [
-                                    "data de depósito",
-                                    "data de deposito",
-                                    "depósito",
-                                    "deposito",
-                                ]
-                            )
+                        index=encontrar_indice_coluna(
+                            [
+                                "data de depósito",
+                                "data de deposito",
+                                "data deposito",
+                                "depósito",
+                                "deposito",
+                            ]
                         ),
+                        key="map_deposito",
                     )
 
                     col_linguagem = st.selectbox(
                         "Linguagem",
-                        colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                [
-                                    "linguagem",
-                                    "linguagem do software",
-                                ]
-                            )
+                        colunas_opcionais,
+                        index=encontrar_indice_opcional(
+                            [
+                                "linguagem",
+                                "linguagem do software",
+                            ]
                         ),
+                        key="map_linguagem",
                     )
 
                 # --------------------------------------------
@@ -1330,56 +1362,57 @@ elif pagina == "📤 Importar Excel":
 
                     col_campus = st.selectbox(
                         "Campus",
-                        colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                ["campus"]
-                            )
+                        colunas_opcionais,
+                        index=encontrar_indice_opcional(
+                            ["campus"]
                         ),
+                        key="map_campus",
                     )
 
                     col_gestor = st.selectbox(
                         "Gestor",
-                        colunas,
-                        index=colunas.index(
+                        colunas_opcionais,
+                        index=encontrar_indice_opcional(
                             ["gestor"]
-                        )
+                        ),
+                        key="map_gestor",
                     )
 
                     col_status = st.selectbox(
                         "Status",
-                        colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                ["status"]
-                            )
+                        colunas_opcionais,
+                        index=encontrar_indice_opcional(
+                            ["status"]
                         ),
+                        key="map_status",
                     )
 
                     col_titular = st.selectbox(
                         "Titular / Depositante",
-                        colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                [
-                                    "titular",
-                                    "depositante",
-                                ]
-                            )
+                        colunas_opcionais,
+                        index=encontrar_indice_opcional(
+                            [
+                                "depositante titular",
+                                "depositante / titular",
+                                "titular",
+                                "depositante",
+                            ]
                         ),
+                        key="map_titular",
                     )
 
                     col_inventores = st.selectbox(
                         "Inventores",
-                        colunas,
-                        index=colunas.index(
-                            encontrar_coluna(
-                                [
-                                    "inventores",
-                                    "inventor",
-                                ]
-                            )
+                        colunas_opcionais,
+                        index=encontrar_indice_opcional(
+                            [
+                                "nome inventores",
+                                "nome dos inventores",
+                                "inventores",
+                                "inventor",
+                            ]
                         ),
+                        key="map_inventores",
                     )
 
             # ------------------------------------------------
@@ -1411,16 +1444,18 @@ elif pagina == "📤 Importar Excel":
 
                         def valor_limpo(coluna):
 
-                            valor = row.get(
-                                coluna
-                            )
+                            if (
+                                coluna is None
+                                or coluna == OPCAO_NAO_IMPORTAR
+                            ):
+                                return None
+
+                            valor = row.get(coluna)
 
                             if pd.isna(valor):
                                 return None
 
-                            valor = str(
-                                valor
-                            ).strip()
+                            valor = str(valor).strip()
 
                             if (
                                 not valor
