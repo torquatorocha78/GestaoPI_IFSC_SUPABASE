@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover - permite testes fora do Streamlit
 
 
 # ============================================================
-# CONFIGURAÇÃO SUPABASE
+# 1. CONFIGURAÇÃO E CREDENCIAIS DO SUPABASE
 # ============================================================
 def _segredo(nome: str, padrao: str = "") -> str:
     """Lê primeiro das variáveis de ambiente e, se não houver, do st.secrets."""
@@ -33,8 +33,6 @@ def _segredo(nome: str, padrao: str = "") -> str:
     return padrao
 
 
-# SUPABASE_URL pode ser informado como https://xxxx.supabase.co
-# ou https://xxxx.supabase.co/rest/v1/ (corrigido automaticamente).
 SUPABASE_URL = _segredo(
     "SUPABASE_URL",
     "https://ptxtclyfwlcwqgwzqieu.supabase.co",
@@ -48,22 +46,15 @@ SUPABASE_TABLE = _segredo("SUPABASE_TABLE", "patentes")
 SUPABASE_ANUIDADES_TABLE = _segredo("SUPABASE_ANUIDADES_TABLE", "anuidades")
 SUPABASE_HISTORICO_JURIDICO_TABLE = "historico_consultas_juridicas"
 
-# PostgREST devolve no máximo 1000 linhas por requisição (padrão do Supabase).
-# 40 PIs x 20 anuidades = 800 linhas, abaixo do limite.
 _LOTE_IDS = 40
-
-# Se o INSERT em anuidades for bloqueado (RLS, view, tipo errado...), não
-# repetimos a tentativa a cada PI/recarga durante este intervalo.
 _BLOQUEIO_SYNC_SEGUNDOS = 300
 _bloqueio_sync: Dict[str, Any] = {"ate": 0.0, "mensagem": None}
-
-# Colunas opcionais que o app consegue dispensar se não existirem no banco.
 _COLUNAS_OPCIONAIS_ANUIDADES = {"descricao_pagamento", "modalidade_pi", "status"}
 _colunas_ausentes: Dict[str, set] = {}
 
 
 # ============================================================
-# ERROS
+# 2. TRATAMENTO DE ERROS DO SUPABASE
 # ============================================================
 class SupabaseError(RuntimeError):
     """Erro HTTP do Supabase com código, mensagem e dica de correção."""
@@ -132,24 +123,14 @@ def _dica_erro(exc: "SupabaseError") -> str:
     return ""
 
 
-def _supabase_error(response: requests.Response) -> str:
-    # Mantida por compatibilidade com código antigo.
-    try:
-        detalhe = response.json()
-    except Exception:
-        detalhe = response.text
-    return f"Supabase retornou {response.status_code}: {detalhe}"
-
-
 # ============================================================
-# SUPABASE REST
+# 3. INTERFACE DE COMUNICAÇÃO HTTP (REQUESTS)
 # ============================================================
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
     if not SUPABASE_KEY:
         raise RuntimeError(
             "A chave SUPABASE_PUBLISHABLE_KEY não foi configurada nos Secrets do Streamlit."
         )
-
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -195,7 +176,6 @@ def _json_seguro(valor: Any) -> Any:
 def _request(method: str, url: str, **kwargs: Any) -> Any:
     if "json" in kwargs:
         kwargs["json"] = _json_seguro(kwargs["json"])
-
     try:
         response = requests.request(method, url, timeout=30, **kwargs)
     except requests.RequestException as exc:
@@ -207,10 +187,8 @@ def _request(method: str, url: str, **kwargs: Any) -> Any:
         except Exception:
             detalhe = response.text
         raise SupabaseError(response.status_code, detalhe, method, url)
-
     if not response.text:
         return None
-
     try:
         return response.json()
     except Exception:
@@ -252,7 +230,7 @@ def _enviar_com_ajuste(method: str, url: str, prefer: str, payload: Any, tabela:
 
 
 # ============================================================
-# NORMALIZAÇÃO
+# 4. LIMPEZA E NORMALIZAÇÃO DE DADOS
 # ============================================================
 def _normalizar_texto(valor: Any) -> str:
     valor = _valor_limpo(valor)
@@ -276,7 +254,6 @@ def normalizar_modalidade(modalidade: Any) -> str:
 
 
 def _valor_limpo(valor: Any) -> Optional[Any]:
-    """Retorna None para vazio/NaN e converte numpy/Timestamp para tipos nativos."""
     if valor is None:
         return None
     try:
@@ -302,14 +279,12 @@ def _int_ou_none(valor: Any) -> Optional[int]:
 
 
 def _parse_data(valor: Any) -> Optional[str]:
-    """Converte para AAAA-MM-DD. Retorna None se não for uma data válida."""
+    """Converte datas para AAAA-MM-DD."""
     valor = _valor_limpo(valor)
     if valor is None:
         return None
-
     texto = str(valor).strip()
     try:
-        # Formato ISO (vindo do Supabase ou do date_input) não usa dayfirst.
         if re.match(r"^\d{4}-\d{2}-\d{2}", texto):
             return pd.to_datetime(texto[:10], format="%Y-%m-%d").date().isoformat()
         return pd.to_datetime(texto, dayfirst=True, errors="raise").date().isoformat()
@@ -321,7 +296,6 @@ def _normalizar_status(status: Any) -> str:
     status = _valor_limpo(status)
     if not status:
         return "Ativo"
-
     chave = _normalizar_texto(status)
     mapa = {
         "patente_concedida": "Patente Concedida",
@@ -372,12 +346,11 @@ def _deve_pagar(gestor: Any, status: Any) -> bool:
 
 
 # ============================================================
-# PREPARAÇÃO DOS REGISTROS
+# 5. MAPEAMENTO E PREPARAÇÃO DE COLUNAS
 # ============================================================
 def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-
     aliases = {
         "numero_patente": ("numero_patente", "processo", "numero de patente", "patente"),
         "data_deposito": ("data_deposito", "deposito", "depósito", "data do deposito"),
@@ -400,7 +373,6 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
         "termo_cessao": ("termo_cessao", "termo de cessao", "termo de cessão"),
         "ipc_classificacao": ("ipc_classificacao", "ipc classificacao", "ipc classificação", "ipc"),
     }
-
     for destino, nomes in aliases.items():
         if destino in df.columns:
             continue
@@ -413,33 +385,19 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# PATENTES / PIs
+# 6. OPERAÇÕES DE PROPRIEDADE INTELECTUAL (PIs)
 # ============================================================
 def init_database() -> None:
-    # Apenas testa a conexão. A estrutura é criada pelo SQL no Supabase.
-    _request(
-        "GET",
-        f"{_endpoint()}?select=id&limit=1",
-        headers=_headers(),
-    )
+    _request("GET", f"{_endpoint()}?select=id&limit=1", headers=_headers())
 
 
 def obter_patentes() -> pd.DataFrame:
-    data = _request(
-        "GET",
-        f"{_endpoint()}?select=*&order=id.asc",
-        headers=_headers(),
-    )
+    data = _request("GET", f"{_endpoint()}?select=*&order=id.asc", headers=_headers())
     return _preparar_patentes(pd.DataFrame(data or []))
 
 
 def obter_patente(patente_id: Any) -> Optional[pd.Series]:
-    """Busca uma única PI pelo id (1 requisição, em vez de baixar todas)."""
-    data = _request(
-        "GET",
-        f"{_patente_url(patente_id)}&select=*&limit=1",
-        headers=_headers(),
-    ) or []
+    data = _request("GET", f"{_patente_url(patente_id)}&select=*&limit=1", headers=_headers()) or []
     df = _preparar_patentes(pd.DataFrame(data))
     return None if df.empty else df.iloc[0]
 
@@ -451,7 +409,6 @@ def _patente_url(patente_id: Any) -> str:
 def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
     gestor = dados.get("gestor")
     status = _normalizar_status(dados.get("status_patente", dados.get("status")))
-
     payload = {
         "numero_patente": dados.get("numero"),
         "data_deposito": _parse_data(dados.get("data_dep")),
@@ -474,9 +431,6 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
         "termo_cessao": dados.get("termo_cessao"),
         "ipc_classificacao": dados.get("ipc_classificacao"),
     }
-
-    # O banco possui a coluna gerada "pagar". Não enviamos o valor;
-    # o próprio Supabase calcula com gestor + status.
     limpo = {chave: _valor_limpo(valor) for chave, valor in payload.items()}
     if limpo.get("id_externo") is not None:
         limpo["id_externo"] = str(limpo["id_externo"])
@@ -484,20 +438,18 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================
-# CRONOGRAMA DE PAGAMENTOS
+# 7. CRONOGRAMAS E SINCRO EM LOTE (OTIMIZAÇÃO DO FINANCEIRO)
 # ============================================================
 def _calcular_cronograma(data_dep: Any, modalidade_pi: Any) -> List[Dict[str, Any]]:
     data_iso = _parse_data(data_dep)
     if not data_iso:
         return []
-
     inicio = pd.Timestamp(data_iso)
     modalidade = normalizar_modalidade(modalidade_pi)
 
     if modalidade == "Software":
         itens = [(1, "Taxa única de depósito", 0)]
     elif modalidade == "Desenho Industrial":
-        # Depósito + 4 quinquênios.
         itens = [(1, "Taxa de depósito", 0)]
         itens += [(i + 1, f"{i}º quinquênio", i * 5) for i in range(1, 5)]
     else:
@@ -509,7 +461,6 @@ def _calcular_cronograma(data_dep: Any, modalidade_pi: Any) -> List[Dict[str, An
         fim_ord = ini_ord + pd.DateOffset(months=3)
         ini_ext = fim_ord + pd.DateOffset(days=1)
         fim_ext = ini_ext + pd.DateOffset(months=6)
-
         cronograma.append({
             "numero_anuidade": numero,
             "descricao_pagamento": descricao,
@@ -521,7 +472,6 @@ def _calcular_cronograma(data_dep: Any, modalidade_pi: Any) -> List[Dict[str, An
             "status": "pendente",
             "modalidade_pi": modalidade,
         })
-
     return cronograma
 
 
@@ -553,7 +503,7 @@ _CAMPOS_CRONOGRAMA = (
 def _registro_difere(existente: Dict[str, Any], payload: Dict[str, Any]) -> bool:
     for campo in _CAMPOS_CRONOGRAMA:
         if campo not in existente:
-            continue  # coluna não existe no banco
+            continue
         atual = _valor_limpo(existente.get(campo))
         novo = payload.get(campo)
         if campo.startswith("data_"):
@@ -570,14 +520,12 @@ def _sync_bloqueado() -> Optional[str]:
 
 
 def _bloquear_sync(exc: Exception) -> None:
-    # Erros de estrutura/permissão não se resolvem sozinhos: evita repetir a cada PI.
     if isinstance(exc, SupabaseError) and exc.status_code in (400, 401, 403, 404, 405, 409):
         _bloqueio_sync["mensagem"] = str(exc)
         _bloqueio_sync["ate"] = time.time() + _BLOQUEIO_SYNC_SEGUNDOS
 
 
 def liberar_sincronizacao() -> None:
-    """Permite nova tentativa de gravar cronogramas (após corrigir o banco)."""
     _bloqueio_sync["mensagem"] = None
     _bloqueio_sync["ate"] = 0.0
     _colunas_ausentes.clear()
@@ -590,16 +538,9 @@ def _sincronizar_anuidades(
     existentes: Optional[List[Dict[str, Any]]] = None,
     atualizar_existentes: bool = True,
 ) -> None:
-    """Cria/atualiza o cronograma na tabela anuidades sem apagar pagamentos já registrados.
-
-    - Insere todas as parcelas faltantes em UMA requisição (antes eram até 20).
-    - Só faz PATCH quando as datas/descrição realmente mudaram.
-    - Nunca sobrescreve status/data_pagamento já registrados.
-    """
     cronograma = _calcular_cronograma(data_dep, modalidade_pi)
     if not cronograma:
         return
-
     bloqueio = _sync_bloqueado()
     if bloqueio:
         raise RuntimeError(bloqueio)
@@ -630,7 +571,6 @@ def _sincronizar_anuidades(
                 "data_fim_extraordinario": item["data_fim_extraordinario"],
                 "modalidade_pi": item["modalidade_pi"],
             }
-
             existente = existentes_por_numero.get(numero)
             if existente is None:
                 novos.append({**payload, "status": "pendente"})
@@ -643,7 +583,6 @@ def _sincronizar_anuidades(
                     tabela,
                     _COLUNAS_OPCIONAIS_ANUIDADES,
                 )
-
         if novos:
             _enviar_com_ajuste(
                 "POST",
@@ -659,7 +598,6 @@ def _sincronizar_anuidades(
 
 
 def garantir_pagamentos_existentes() -> List[str]:
-    """Garante que PIs existentes tenham seus cronogramas. Retorna os avisos de falha."""
     df = obter_patentes()
     if df.empty:
         return []
@@ -669,11 +607,7 @@ def garantir_pagamentos_existentes() -> List[str]:
 
 def _sincronizar_apos_salvar(patente_id: Any, dados: Dict[str, Any]) -> Optional[str]:
     try:
-        _sincronizar_anuidades(
-            patente_id,
-            dados.get("data_dep"),
-            dados.get("modalidade_pi"),
-        )
+        _sincronizar_anuidades(patente_id, dados.get("data_dep"), dados.get("modalidade_pi"))
         return None
     except Exception as exc:
         return f"PI salva, mas o cronograma de pagamentos não foi gravado: {exc}"
@@ -711,7 +645,6 @@ def adicionar_patente(
         )
         if not resultado:
             raise RuntimeError("Supabase não retornou o ID da PI cadastrada.")
-
         patente_id = resultado[0]["id"] if isinstance(resultado, list) else resultado["id"]
         aviso = _sincronizar_apos_salvar(patente_id, dados)
         if aviso:
@@ -740,8 +673,7 @@ def atualizar_patente(patente_id: Any, **dados: Any) -> Tuple[bool, str]:
             _sincronizar_anuidades(patente_id, data_dep, modalidade)
     except Exception as exc:
         return True, f"PI atualizada, mas o cronograma não foi sincronizado: {exc}"
-
-    return True, "PI atualizada com sucesso no Supabase"
+    return True, "PI updated com sucesso no Supabase"
 
 
 def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bool, str]:
@@ -753,7 +685,6 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
             headers=_headers(),
         )
         payload = _payload_patente(dados)
-
         if existente:
             patente_id = existente[0]["id"]
             _request(
@@ -779,23 +710,20 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
 
 
 # ============================================================
-# ANUIDADES / PAGAMENTOS
+# 8. PROCESSAMENTO E EXIBIÇÃO DE PAGAMENTOS
 # ============================================================
 def _status_calculado_anuidade(row: pd.Series) -> str:
     status_atual = str(_valor_limpo(row.get("status")) or "").lower()
     if status_atual == "nao_pagar":
         return "nao_pagar"
-    # Atenção: NaN é "verdadeiro" em Python, por isso usar _valor_limpo.
     if _valor_limpo(row.get("data_pagamento")) or status_atual == "pago":
         return "pago"
-
     hoje = date.today()
     try:
         fim_extra = pd.to_datetime(row["data_fim_extraordinario"]).date()
         inicio_ord = pd.to_datetime(row["data_inicio_ordinario"]).date()
         fim_ord = pd.to_datetime(row["data_fim_ordinario"]).date()
         inicio_extra = pd.to_datetime(row["data_inicio_extraordinario"]).date()
-
         if hoje > fim_extra:
             return "vermelho"
         if inicio_extra <= hoje <= fim_extra:
@@ -806,7 +734,6 @@ def _status_calculado_anuidade(row: pd.Series) -> str:
             return "futuro"
     except Exception:
         pass
-
     return "pendente"
 
 
@@ -831,16 +758,10 @@ def _mesclar_cronograma(
     cronograma: List[Dict[str, Any]],
     registros: List[Dict[str, Any]],
 ) -> pd.DataFrame:
-    """Une o cronograma calculado com o que está salvo no banco.
-
-    O banco prevalece; o calculado preenche colunas ausentes/vazias.
-    Parcelas fora do cronograma atual (ex.: modalidade alterada) são ignoradas.
-    """
     linhas: Dict[int, Dict[str, Any]] = {
         int(c["numero_anuidade"]): {**c, "id": None, "patente_id": _py(patente_id), "origem": "calculado"}
         for c in cronograma
     }
-
     for registro in registros:
         numero = _int_ou_none(registro.get("numero_anuidade"))
         if numero is None:
@@ -859,7 +780,6 @@ def _mesclar_cronograma(
     for coluna in _COLUNAS_ANUIDADE:
         if coluna not in df.columns:
             df[coluna] = None
-    # Evita NaN (que é "verdadeiro") nas colunas de texto/data.
     return df.astype(object).where(pd.notna(df), None)
 
 
@@ -898,47 +818,35 @@ def _montar_anuidades_pi(
         return vazio
 
     resultado = _mesclar_cronograma(patente_id, cronograma, registros)
-
     if not _deve_pagar(pi.get("gestor"), pi.get("status")):
         resultado["status"] = "nao_pagar"
     else:
         resultado["status"] = resultado.apply(_status_calculado_anuidade, axis=1)
-
     resultado.attrs["aviso"] = aviso
     return resultado
 
 
 def obter_anuidades(patente_id: Any, pi: Optional[pd.Series] = None) -> pd.DataFrame:
-    """Cronograma de uma PI. Nunca derruba a página: em caso de falha na gravação,
-    devolve o cronograma calculado e registra o motivo em df.attrs['aviso']."""
     if pi is None:
         pi = obter_patente(patente_id)
         if pi is None:
             return pd.DataFrame(columns=_COLUNAS_ANUIDADE)
-
     erro_leitura = None
     try:
         registros = _buscar_anuidades_pi(patente_id)
     except Exception as exc:
         registros = []
         erro_leitura = f"Não foi possível ler a tabela {SUPABASE_ANUIDADES_TABLE}: {exc}"
-
     return _montar_anuidades_pi(pi, registros, erro_leitura)
 
 
 def obter_anuidades_lote(df_pis: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """Cronogramas de várias PIs com poucas requisições.
-
-    Retorna {str(id_da_pi): DataFrame}. Use chave_pi(pi['id']) para consultar.
-    """
     resultado: Dict[str, pd.DataFrame] = {}
     if df_pis is None or df_pis.empty or "id" not in df_pis.columns:
         return resultado
-
     ids = [_py(i) for i in df_pis["id"].tolist() if _valor_limpo(i) is not None]
     registros_por_pi: Dict[str, List[Dict[str, Any]]] = {}
     erro_leitura = None
-
     try:
         for inicio in range(0, len(ids), _LOTE_IDS):
             bloco = ids[inicio:inicio + _LOTE_IDS]
@@ -956,12 +864,7 @@ def obter_anuidades_lote(df_pis: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
     for _, pi in df_pis.iterrows():
         chave = chave_pi(pi.get("id"))
-        resultado[chave] = _montar_anuidades_pi(
-            pi,
-            registros_por_pi.get(chave, []),
-            erro_leitura,
-        )
-
+        resultado[chave] = _montar_anuidades_pi(pi, registros_por_pi.get(chave, []), erro_leitura)
     return resultado
 
 
@@ -973,7 +876,6 @@ def chave_pi(patente_id: Any) -> str:
 
 
 def avisos_anuidades(mapa_ou_df: Any) -> List[str]:
-    """Lista de avisos únicos (erros reais do Supabase) gerados ao montar cronogramas."""
     if isinstance(mapa_ou_df, pd.DataFrame):
         frames = [mapa_ou_df]
     else:
@@ -992,22 +894,17 @@ def atualizar_status_anuidade(
     novo_status: str,
     data_pagamento: Optional[str] = None,
 ) -> None:
-    """Registra pagamento ou marca a anuidade como não pagar."""
     status = _normalizar_texto(novo_status)
     if status not in {"pago", "nao_pagar", "pendente"}:
         raise ValueError("Status de pagamento inválido.")
-
     patente_id_q = quote(str(_py(patente_id)), safe="")
     numero_q = quote(str(int(numero_anuidade)), safe="")
     url_busca = (
         f"{_endpoint(SUPABASE_ANUIDADES_TABLE)}"
         f"?patente_id=eq.{patente_id_q}&numero_anuidade=eq.{numero_q}&limit=1"
     )
-
     existente = _request("GET", url_busca, headers=_headers()) or []
-
     if not existente:
-        # Cria o cronograma se ainda não existir (sem respeitar o bloqueio: é ação do usuário).
         pi = obter_patente(patente_id)
         if pi is None:
             raise RuntimeError("PI não encontrada.")
@@ -1020,10 +917,8 @@ def atualizar_status_anuidade(
             "Pagamento/anuidade não encontrado para esta PI. Se o registro existe no banco, "
             "verifique a policy de SELECT da tabela anuidades."
         )
-
     registro_id = existente[0]["id"]
     payload: Dict[str, Any] = {"status": status}
-
     if status == "pago":
         payload["data_pagamento"] = _parse_data(data_pagamento) or date.today().isoformat()
     else:
@@ -1038,15 +933,11 @@ def atualizar_status_anuidade(
 
 
 def deletar_patente(patente_id: Any) -> None:
-    _request(
-        "DELETE",
-        _patente_url(patente_id),
-        headers=_headers("return=minimal"),
-    )
+    _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
 
 
 # ============================================================
-# IMPORTAÇÃO EXCEL
+# 9. IMPORTAÇÃO E ANÁLISE DE PLANILHAS EXCEL
 # ============================================================
 def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
     resultados = []
@@ -1056,7 +947,6 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
         return [("ERRO_GERAL", False, f"Falha ao ler a planilha: {exc}")]
 
     colunas = {_normalizar_texto(col): col for col in df.columns}
-
     def campo(*nomes: str) -> Optional[str]:
         for nome in nomes:
             coluna = colunas.get(_normalizar_texto(nome))
@@ -1093,11 +983,8 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
     for idx, row in df.iterrows():
         numero = valor(row, "numero")
         data_dep = valor(row, "data_dep", _parse_data)
-
         if not numero or not data_dep:
-            resultados.append(
-                (str(numero or f"Linha {idx + 2}"), False, "Processo ou depósito ausente/inválido.")
-            )
+            resultados.append((str(numero or f"Linha {idx + 2}"), False, "Processo ou depósito ausente/inválido."))
             continue
 
         dados = {
@@ -1122,10 +1009,8 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
             "termo_cessao": valor(row, "termo_cessao"),
             "ipc_classificacao": valor(row, "ipc_classificacao"),
         }
-
         ok, msg = salvar_patente_importada(dados)
         resultados.append((dados["numero"], ok, msg))
-
     return resultados
 
 
@@ -1134,26 +1019,19 @@ def analisar_inconsistencias_excel(arquivo_excel) -> List[str]:
         df = pd.read_excel(arquivo_excel)
     except Exception as exc:
         return [f"Falha ao ler a planilha: {exc}"]
-
     colunas = {_normalizar_texto(col): col for col in df.columns}
     problemas = []
-
     if not any(c in colunas for c in ["processo", "numero_patente", "numero_de_patente", "patente"]):
         problemas.append("Coluna obrigatória 'Processo' não foi encontrada.")
-
     if not any(c in colunas for c in ["deposito", "data_deposito", "data_do_deposito"]):
         problemas.append("Coluna obrigatória 'Depósito' não foi encontrada.")
-
     if not any(c in colunas for c in ["modalidade_de_pi", "modalidade_pi", "modalidade", "tipo"]):
-        problemas.append(
-            "Coluna 'Modalidade de PI' não encontrada; os registros serão tratados como Patente."
-        )
-
+        problemas.append("Coluna 'Modalidade de PI' não encontrada; os registros serão tratados como Patente.")
     return problemas
 
 
 # ============================================================
-# ASSISTENTE JURÍDICO NIT - HISTÓRICO NO SUPABASE
+# 10. HISTÓRICO DO ASSISTENTE JURÍDICO (RAG)
 # ============================================================
 def registrar_consulta_juridica(
     pergunta: str,
@@ -1164,13 +1042,10 @@ def registrar_consulta_juridica(
     ativo_pi_id: Any = None,
     modelo: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Grava uma consulta do Assistente Jurídico (tabela historico_consultas_juridicas)."""
     pergunta = str(pergunta or "").strip()
     resposta = str(resposta or "").strip()
-
     if not pergunta:
         return False, "Pergunta jurídica não informada."
-
     payload = {
         "pergunta": pergunta,
         "resposta": resposta,
@@ -1180,37 +1055,25 @@ def registrar_consulta_juridica(
         "ativo_pi_id": _valor_limpo(ativo_pi_id),
         "modelo": _valor_limpo(modelo),
     }
-
     try:
-        _request(
-            "POST",
-            _endpoint(SUPABASE_HISTORICO_JURIDICO_TABLE),
-            headers=_headers("return=minimal"),
-            json=payload,
-        )
+        _request("POST", _endpoint(SUPABASE_HISTORICO_JURIDICO_TABLE), headers=_headers("return=minimal"), json=payload)
         return True, "Consulta jurídica registrada no histórico."
     except Exception as exc:
         return False, f"Não foi possível registrar o histórico: {exc}"
 
 
 def obter_historico_consultas_juridicas(limite: int = 50) -> pd.DataFrame:
-    """Retorna as consultas jurídicas mais recentes."""
     try:
         limite = max(1, min(int(limite), 200))
     except Exception:
         limite = 50
-
-    url = (
-        f"{_endpoint(SUPABASE_HISTORICO_JURIDICO_TABLE)}"
-        f"?select=*&order=created_at.desc&limit={limite}"
-    )
+    url = f"{_endpoint(SUPABASE_HISTORICO_JURIDICO_TABLE)}?select=*&order=created_at.desc&limit={limite}"
     registros = _request("GET", url, headers=_headers()) or []
     return pd.DataFrame(registros)
 
 
 def obter_historico_consulta_juridica(consulta_id: Any) -> Optional[Dict[str, Any]]:
-    """Recupera uma consulta específica do histórico."""
-    consulta_id_q = quote(str(_py(consulta_id)), safe="")
+    consulta_id_q = quote(str(_py(consulta_id)), safe='')
     registros = _request(
         "GET",
         f"{_endpoint(SUPABASE_HISTORICO_JURIDICO_TABLE)}?id=eq.{consulta_id_q}&select=*&limit=1",
@@ -1220,14 +1083,9 @@ def obter_historico_consulta_juridica(consulta_id: Any) -> Optional[Dict[str, An
 
 
 def excluir_consulta_juridica(consulta_id: Any) -> Tuple[bool, str]:
-    """Exclui uma consulta específica do histórico."""
-    consulta_id_q = quote(str(_py(consulta_id)), safe="")
+    consulta_id_q = quote(str(_py(consulta_id)), safe='')
     try:
-        _request(
-            "DELETE",
-            f"{_endpoint(SUPABASE_HISTORICO_JURIDICO_TABLE)}?id=eq.{consulta_id_q}",
-            headers=_headers("return=minimal"),
-        )
+        _request("DELETE", f"{_endpoint(SUPABASE_HISTORICO_JURIDICO_TABLE)}?id=eq.{consulta_id_q}", headers=_headers("return=minimal"))
         return True, "Consulta removida do histórico."
     except Exception as exc:
         return False, f"Erro ao remover consulta: {exc}"
@@ -1240,8 +1098,8 @@ def buscar_contexto_ativo_pi(
 ) -> pd.DataFrame:
     """Busca a PI na MESMA tabela usada pelo app (patentes).
 
-    Antes consultava 'ativos_pi' usando o id vindo de 'patentes', o que trazia
-    a PI errada ou nada.
+    Antes consultava a tabela 'ativos_pi' usando o ID de 'patentes',
+    gerando conflito de chaves e dados vazios.
     """
     try:
         limite = max(1, min(int(limite), 100))
@@ -1264,17 +1122,11 @@ def buscar_contexto_ativo_pi(
             f"gestor.ilike.*{termo_q}*"
             ")"
         )
-
-    registros = _request(
-        "GET",
-        f"{_endpoint()}?select=*&{filtro}&limit={limite}",
-        headers=_headers(),
-    ) or []
+    registros = _request("GET", f"{_endpoint()}?select=*&{filtro}&limit={limite}", headers=_headers()) or []
     return _preparar_patentes(pd.DataFrame(registros))
 
 
 def obter_obrigacoes_ativo(ativo_pi_id: Any, limite: int = 100) -> pd.DataFrame:
-    """Obrigações financeiras da PI = cronograma da tabela anuidades."""
     df = obter_anuidades(ativo_pi_id)
     try:
         limite = max(1, min(int(limite), 200))
