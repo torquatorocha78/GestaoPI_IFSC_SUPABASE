@@ -21,12 +21,30 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
+# Modelo multilíngue: o anterior (msmarco-bert-base-dot-v5) é treinado só em inglês
+# e usa produto escalar, o que piora a busca em documentos jurídicos em português.
+EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
 
 def _get_groq_key() -> str:
+    # Antes: se st.secrets existisse sem a chave, nunca caía para a variável de ambiente.
+    chave = ""
     try:
-        return str(st.secrets.get("GROQ_API_KEY", "")).strip()
+        chave = str(st.secrets.get("GROQ_API_KEY", "") or "").strip()
     except Exception:
-        return os.getenv("GROQ_API_KEY", "").strip()
+        chave = ""
+    return chave or os.getenv("GROQ_API_KEY", "").strip()
+
+
+@st.cache_resource(show_spinner=False)
+def _carregar_embeddings():
+    # Carrega o modelo uma única vez por servidor (antes recarregava a cada PDF).
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+
+def _texto_limpo(valor: Any) -> str:
+    valor = db._valor_limpo(valor)
+    return "" if valor is None else str(valor)
 
 
 def _indexar_pdf(pdf_bytes: bytes, chroma_dir: str):
@@ -42,14 +60,14 @@ def _indexar_pdf(pdf_bytes: bytes, chroma_dir: str):
             chunk_overlap=150,
         )
         chunks = splitter.split_documents(docs)
-
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/msmarco-bert-base-dot-v5"
-        )
+        if not chunks:
+            raise ValueError(
+                "Nenhum texto extraído do PDF (pode ser um PDF escaneado/imagem)."
+            )
 
         return Chroma.from_documents(
             documents=chunks,
-            embedding=embeddings,
+            embedding=_carregar_embeddings(),
             persist_directory=chroma_dir,
         )
     finally:
@@ -100,18 +118,20 @@ def _texto_contexto_banco(df_pi, df_obrigacoes) -> str:
     if df_pi is not None and not df_pi.empty:
         row = df_pi.iloc[0].to_dict()
 
+        # Campos da tabela patentes (a mesma usada no restante do app).
         campos = [
-            "id", "tipo_pi", "numero_processo", "titulo", "descricao",
-            "titular", "gestor", "inventores", "campus", "status",
+            "id", "id_externo", "modalidade_pi", "numero_patente", "titulo",
+            "descricao", "titular", "gestor", "inventores", "campus", "status",
             "data_deposito", "data_concessao", "data_publicacao",
-            "data_exame", "ano", "ipc_classificacao", "linguagem",
-            "acordo_titularidade",
+            "data_exame", "ano", "ipc_classificacao",
+            "acordo_titularidade", "procuracao", "termo_cessao",
         ]
 
         linhas = []
         for campo in campos:
-            if campo in row and row.get(campo) not in (None, ""):
-                linhas.append(f"{campo}: {row.get(campo)}")
+            valor = _texto_limpo(row.get(campo))
+            if valor:
+                linhas.append(f"{campo}: {valor}")
 
         if linhas:
             partes.append("CADASTRO DA PI NO SUPABASE:\n" + "\n".join(linhas))
@@ -121,19 +141,18 @@ def _texto_contexto_banco(df_pi, df_obrigacoes) -> str:
             for _, r in df_obrigacoes.iterrows():
                 obrigacoes.append(
                     " | ".join(
-                        str(r.get(campo))
+                        f"{campo}: {_texto_limpo(r.get(campo))}"
                         for campo in [
-                            "tipo_obrigacao",
-                            "numero_obrigacao",
+                            "numero_anuidade",
                             "descricao_pagamento",
-                            "data_inicio",
-                            "data_vencimento",
+                            "data_inicio_ordinario",
+                            "data_fim_ordinario",
                             "data_inicio_extraordinario",
                             "data_fim_extraordinario",
                             "data_pagamento",
                             "status",
                         ]
-                        if r.get(campo) not in (None, "")
+                        if _texto_limpo(r.get(campo))
                     )
                 )
 
@@ -214,8 +233,9 @@ def render_assistente_juridico():
 
                 for _, row in df_ativos.iterrows():
                     texto = (
-                        f"{row.get('numero_patente') or row.get('numero_processo') or '-'}"
-                        f" — {row.get('titulo') or 'Sem título'}"
+                        f"{_texto_limpo(row.get('numero_patente')) or '-'}"
+                        f" — {_texto_limpo(row.get('titulo')) or 'Sem título'}"
+                        f" [{row['id']}]"
                     )
                     opcoes.append(texto)
                     mapa[texto] = row["id"]
@@ -248,6 +268,11 @@ def render_assistente_juridico():
         if st.session_state.juridico_pdf_hash != pdf_hash:
             with st.spinner("Indexando o PDF no Chroma..."):
                 try:
+                    # Diretório novo para cada PDF: antes todos iam para a mesma
+                    # coleção e os trechos de PDFs antigos se misturavam aos do novo.
+                    st.session_state.juridico_chroma_dir = tempfile.mkdtemp(
+                        prefix="chroma_rag_nit_"
+                    )
                     st.session_state.juridico_vectordb = _indexar_pdf(
                         pdf_bytes,
                         st.session_state.juridico_chroma_dir,
@@ -260,10 +285,16 @@ def render_assistente_juridico():
                 except Exception as exc:
                     st.error(f"Erro ao indexar o PDF: {exc}")
                     st.session_state.juridico_vectordb = None
+                    st.session_state.juridico_pdf_hash = None
         else:
             st.success(
                 f"PDF já indexado: {pdf_file.name}"
             )
+    elif st.session_state.juridico_vectordb is not None:
+        # PDF removido do uploader: não usar mais o índice antigo.
+        st.session_state.juridico_vectordb = None
+        st.session_state.juridico_pdf_hash = None
+        st.session_state.pop("juridico_pdf_nome", None)
 
     st.subheader("3. Consulta")
 
@@ -435,10 +466,10 @@ REGRAS:
             st.info("Nenhuma consulta jurídica registrada ainda.")
         else:
             for _, row in historico.iterrows():
-                data = row.get("created_at") or ""
-                pergunta_hist = row.get("pergunta") or ""
-                documento = row.get("documento_nome") or "Sem PDF"
-                paginas = row.get("paginas") or "-"
+                data = _texto_limpo(row.get("created_at"))[:19].replace("T", " ")
+                pergunta_hist = _texto_limpo(row.get("pergunta"))
+                documento = _texto_limpo(row.get("documento_nome")) or "Sem PDF"
+                paginas = _texto_limpo(row.get("paginas")) or "-"
 
                 with st.expander(
                     f"{data} — {pergunta_hist[:100]}"
@@ -447,7 +478,7 @@ REGRAS:
                     st.markdown(f"**Documento:** {documento}")
                     st.markdown(f"**Páginas:** {paginas}")
                     st.markdown("**Resposta:**")
-                    st.write(row.get("resposta") or "")
+                    st.write(_texto_limpo(row.get("resposta")))
 
                     if st.button(
                         "🗑️ Excluir esta consulta",
