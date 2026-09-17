@@ -35,6 +35,18 @@ except Exception as exc:
 # FUNÇÕES AUXILIARES
 # ============================================================
 
+def text_clean(valor):
+    """Converte valores nulos/NaN em texto vazio para os campos do Streamlit."""
+    if valor is None:
+        return ""
+    try:
+        if pd.isna(valor):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(valor)
+
+
 def ano_clean(valor):
     """Retorna o ano como inteiro de forma segura, evitando erros com NaN/None."""
     if valor is None or pd.isna(valor) or str(valor).strip() == "":
