@@ -23,7 +23,30 @@ except Exception as exc:
 
 
 def text_clean(valor):
-    return "" if valor is None or pd.isna(valor) else str(valor)
+    valor = db._valor_limpo(valor)
+    return "" if valor is None else str(valor)
+
+
+def valor_ou(valor, padrao="-"):
+    """Evita exibir 'nan' (NaN é 'verdadeiro' em Python, então `x or '-'` falha)."""
+    valor = db._valor_limpo(valor)
+    return padrao if valor is None else valor
+
+
+def mostrar_avisos(avisos):
+    """Mostra o erro REAL do Supabase (o Streamlit Cloud oculta erros não tratados)."""
+    if not avisos:
+        return
+    with st.expander(f"⚠️ {len(avisos)} problema(s) ao gravar/ler pagamentos no Supabase", expanded=True):
+        for aviso in avisos[:5]:
+            st.warning(aviso)
+        st.caption(
+            "Os prazos abaixo continuam sendo exibidos com base no cálculo. "
+            "Corrija o banco com o script correcao_supabase.sql e clique em tentar novamente."
+        )
+        if st.button("🔄 Tentar gravar novamente", key=f"retry_sync_{abs(hash(tuple(avisos)))}"):
+            db.liberar_sincronizacao()
+            st.rerun()
 
 
 def status_pagamento(row):
@@ -34,7 +57,7 @@ def status_pagamento(row):
         row.get("data_fim_ordinario"),
         row.get("data_inicio_extraordinario"),
         row.get("data_fim_extraordinario"),
-        row.get("data_pagamento"),
+        db._valor_limpo(row.get("data_pagamento")),
     )
 
 
@@ -42,13 +65,15 @@ def label_pagamento(modalidade):
     return "Taxa" if modalidade == "Software" else ("Pagamento" if modalidade == "Desenho Industrial" else "Anuidade")
 
 
-def montar_linhas_dashboard(df_pis, modalidade):
+def montar_linhas_dashboard(df_pis, modalidade, mapa_anuidades=None):
     hoje = datetime.now().date()
     linhas = []
+    if mapa_anuidades is None:
+        mapa_anuidades = db.obter_anuidades_lote(df_pis)
     for _, pi in df_pis.iterrows():
-        pagamentos = db.obter_anuidades(pi["id"])
+        pagamentos = mapa_anuidades.get(db.chave_pi(pi["id"]), pd.DataFrame())
         for _, pgto in pagamentos.iterrows():
-            if pgto.get("status") == "nao_pagar" or pgto.get("data_pagamento"):
+            if pgto.get("status") in ("nao_pagar", "pago") or db._valor_limpo(pgto.get("data_pagamento")):
                 continue
             inicio_ord = utils._para_data(pgto.get("data_inicio_ordinario"))
             fim_ord = utils._para_data(pgto.get("data_fim_ordinario"))
@@ -57,15 +82,15 @@ def montar_linhas_dashboard(df_pis, modalidade):
             dias = (fim_ord - hoje).days
             status = "amarelo" if dias <= 30 else "verde"
             linhas.append({
-                "ID": pi.get("id_externo") or pi["id"],
+                "ID": valor_ou(pi.get("id_externo"), pi["id"]),
                 "Processo": pi["numero_patente"],
-                "Título": pi.get("titulo") or "-",
-                label_pagamento(modalidade): pgto["descricao_pagamento"] or pgto["numero_anuidade"],
+                "Título": valor_ou(pi.get("titulo")),
+                label_pagamento(modalidade): valor_ou(pgto.get("descricao_pagamento"), pgto.get("numero_anuidade")),
                 "Fim Prazo Ordinário": utils.formatar_data(pgto["data_fim_ordinario"]),
                 "Dias p/ Vencer": dias,
                 "Status": f"{utils.criar_emoji_status(status)} {status.upper()}",
-                "Gestor": pi.get("gestor") or "N/A",
-                "Campus": pi.get("campus") or "-",
+                "Gestor": valor_ou(pi.get("gestor"), "N/A"),
+                "Campus": valor_ou(pi.get("campus")),
             })
     return linhas
 
@@ -78,7 +103,10 @@ def dashboard_modalidade(titulo, modalidade):
         return
 
     df_tipo = df[df["modalidade_pi"].apply(db.normalizar_modalidade) == modalidade].copy()
-    linhas = montar_linhas_dashboard(df_tipo, modalidade)
+    with st.spinner("Carregando prazos..."):
+        mapa_anuidades = db.obter_anuidades_lote(df_tipo)
+    mostrar_avisos(db.avisos_anuidades(mapa_anuidades))
+    linhas = montar_linhas_dashboard(df_tipo, modalidade, mapa_anuidades)
     df_dash = pd.DataFrame(linhas)
 
     col1, col2, col3, col4 = st.columns(4)
@@ -219,7 +247,12 @@ elif pagina == "➕ Adicionar PI":
                     termo_cessao=termo_cessao,
                     ipc_classificacao=ipc_classificacao,
                 )
-                st.success(msg) if ok else st.error(msg)
+                if not ok:
+                    st.error(msg)
+                elif "cronograma" in msg:
+                    st.warning(msg)
+                else:
+                    st.success(msg)
 
 elif pagina == "📁 Gerenciar PIs":
     st.title("📁 Gerenciar Propriedades Intelectuais")
@@ -256,19 +289,19 @@ elif pagina == "📁 Gerenciar PIs":
         st.subheader("📋 Detalhes da PI")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("🔑 ID", pi.get("id_externo") or "N/A")
+            st.metric("🔑 ID", str(valor_ou(pi.get("id_externo"), "N/A")))
             st.metric("🏛️ Processo", pi["numero_patente"])
         with col2:
             st.metric("📅 Depósito", utils.formatar_data(pi["data_deposito"]))
             st.metric("📅 Concessão", utils.formatar_data(pi["data_concessao"]))
         with col3:
             st.metric("🔬 Modalidade", modalidade)
-            st.metric("🎯 Status", pi.get("status") or "Ativo")
+            st.metric("🎯 Status", valor_ou(pi.get("status"), "Ativo"))
         with col4:
-            st.metric("👤 Titular", pi.get("titular") or "N/A")
-            st.metric("🏫 Campus", pi.get("campus") or "N/A")
+            st.metric("👤 Titular", str(valor_ou(pi.get("titular"), "N/A")))
+            st.metric("🏫 Campus", str(valor_ou(pi.get("campus"), "N/A")))
 
-        if pi.get("descricao"):
+        if db._valor_limpo(pi.get("descricao")):
             st.info(f"**Resumo / Descrição:**\n{pi['descricao']}")
 
         with st.expander("✏️ Editar dados desta PI"):
@@ -281,7 +314,8 @@ elif pagina == "📁 Gerenciar PIs":
                     edit_modalidade = st.selectbox("Modalidade de PI", ["Patente", "Desenho Industrial", "Software"], index=["Patente", "Desenho Industrial", "Software"].index(modalidade))
                     edit_data_dep = st.date_input("Data do Depósito", value=utils._para_data(pi.get("data_deposito")))
                     edit_data_conc = st.date_input("Data de Concessão", value=utils._para_data(pi.get("data_concessao")))
-                    edit_ano = st.number_input("Ano", value=int(pi.get("ano")) if pi.get("ano") else datetime.now().year)
+                    ano_atual = db._int_ou_none(pi.get("ano")) or datetime.now().year
+                    edit_ano = st.number_input("Ano", min_value=1900, max_value=2100, value=int(ano_atual), step=1)
                 with col_b:
                     edit_titular = st.text_area("Depositante / Titular", value=text_clean(pi.get("titular")), height=80)
                     edit_inventores = st.text_area("Inventores", value=text_clean(pi.get("inventores")), height=80)
@@ -305,26 +339,29 @@ elif pagina == "📁 Gerenciar PIs":
                         titulo=edit_titulo,
                         inventores=edit_inventores,
                         campus=edit_campus,
-                        atributos=pi.get("atributos"),
+                        atributos=db._valor_limpo(pi.get("atributos")),
                         id_externo=edit_id_externo,
                         modalidade_pi=edit_modalidade,
                         ano=int(edit_ano) if edit_ano else None,
-                        data_publicacao=pi.get("data_publicacao"),
-                        data_exame=pi.get("data_exame"),
-                        acordo_titularidade=pi.get("acordo_titularidade"),
-                        procuracao=pi.get("procuracao"),
-                        termo_cessao=pi.get("termo_cessao"),
+                        data_publicacao=db._valor_limpo(pi.get("data_publicacao")),
+                        data_exame=db._valor_limpo(pi.get("data_exame")),
+                        acordo_titularidade=db._valor_limpo(pi.get("acordo_titularidade")),
+                        procuracao=db._valor_limpo(pi.get("procuracao")),
+                        termo_cessao=db._valor_limpo(pi.get("termo_cessao")),
                         ipc_classificacao=edit_ipc,
                     )
-                    if ok:
+                    if ok and "cronograma" not in msg:
                         st.success(msg)
                         st.rerun()
+                    elif ok:
+                        st.warning(msg)
                     else:
                         st.error(msg)
 
         st.divider()
         st.subheader(f"💰 Pagamentos - {modalidade}")
-        pagamentos = db.obter_anuidades(pi_id)
+        pagamentos = db.obter_anuidades(pi_id, pi=pi)
+        mostrar_avisos(db.avisos_anuidades(pagamentos))
         if pagamentos.empty:
             st.warning("Nenhum pagamento encontrado para esta PI.")
         else:
@@ -332,10 +369,10 @@ elif pagina == "📁 Gerenciar PIs":
             for _, pgto in pagamentos.iterrows():
                 status = status_pagamento(pgto)
                 linhas.append({
-                    "Pagamento": pgto.get("descricao_pagamento") or pgto["numero_anuidade"],
+                    "Pagamento": valor_ou(pgto.get("descricao_pagamento"), pgto.get("numero_anuidade")),
                     "Início Ordinário": utils.formatar_data(pgto["data_inicio_ordinario"]),
                     "Fim Ordinário": utils.formatar_data(pgto["data_fim_ordinario"]),
-                    "Dias Restantes": utils.obter_dias_restantes(pgto["data_fim_ordinario"], pgto.get("data_pagamento")),
+                    "Dias Restantes": utils.obter_dias_restantes(pgto["data_fim_ordinario"], db._valor_limpo(pgto.get("data_pagamento"))),
                     "Status": f"{utils.criar_emoji_status(status)} {status.upper()}",
                     "Data Pagamento": utils.formatar_data(pgto.get("data_pagamento")),
                 })
@@ -344,7 +381,7 @@ elif pagina == "📁 Gerenciar PIs":
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 opcoes_pagamento = {
-                    f"{row['numero_anuidade']} - {row.get('descricao_pagamento') or label_pagamento(modalidade)}": int(row["numero_anuidade"])
+                    f"{int(row['numero_anuidade'])} - {valor_ou(row.get('descricao_pagamento'), label_pagamento(modalidade))}": int(row["numero_anuidade"])
                     for _, row in pagamentos.iterrows()
                 }
                 num_pagamento = st.selectbox("Selecione o pagamento", list(opcoes_pagamento.keys()))
@@ -368,11 +405,17 @@ elif pagina == "📁 Gerenciar PIs":
                         st.error(str(exc))
 
         st.divider()
-        if st.button("🗑️ Deletar PI", use_container_width=True, type="secondary"):
-            if st.checkbox("Tenho certeza que desejo deletar esta PI definitivamente?"):
+        confirmar = st.checkbox(
+            "Tenho certeza que desejo deletar esta PI definitivamente?",
+            key=f"confirmar_delete_{pi_id}",
+        )
+        if st.button("🗑️ Deletar PI", use_container_width=True, type="secondary", disabled=not confirmar):
+            try:
                 db.deletar_patente(pi_id)
                 st.success("PI deletada com sucesso.")
                 st.rerun()
+            except Exception as exc:
+                st.error(f"Erro ao deletar PI: {exc}")
 
 elif pagina == "📤 Importar Excel":
     st.title("📤 Importar Propriedades Intelectuais do Excel")
@@ -413,16 +456,32 @@ elif pagina == "⚖️ Assistente Jurídico NIT":
 elif pagina == "📄 Gerar Relatórios":
     st.title("📄 Geração de Relatórios")
     df = db.obter_patentes()
+    if df.empty:
+        st.info("Nenhuma PI cadastrada ainda.")
+    # Busca os cronogramas UMA vez e reaproveita nos dois relatórios.
+    with st.spinner("Preparando relatórios..."):
+        mapa_anuidades = db.obter_anuidades_lote(df)
+    mostrar_avisos(db.avisos_anuidades(mapa_anuidades))
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        pdf = report_generator.gerar_relatorio_completo(df)
-        st.download_button("📥 Baixar Relatório Completo", pdf, "relatorio_completo.pdf", "application/pdf")
+        try:
+            pdf = report_generator.gerar_relatorio_completo(df)
+            st.download_button("📥 Baixar Relatório Completo", pdf, "relatorio_completo.pdf", "application/pdf")
+        except Exception as exc:
+            st.error(f"Erro no relatório completo: {exc}")
     with col2:
-        pdf = report_generator.gerar_relatorio_anuidades(df)
-        st.download_button("📥 Baixar Relatório de Pagamentos", pdf, "relatorio_pagamentos.pdf", "application/pdf")
+        try:
+            pdf = report_generator.gerar_relatorio_anuidades(df, mapa_anuidades)
+            st.download_button("📥 Baixar Relatório de Pagamentos", pdf, "relatorio_pagamentos.pdf", "application/pdf")
+        except Exception as exc:
+            st.error(f"Erro no relatório de pagamentos: {exc}")
     with col3:
-        pdf = report_generator.gerar_relatorio_alertas(df)
-        st.download_button("📥 Baixar Relatório de Alertas", pdf, "relatorio_alertas.pdf", "application/pdf")
+        try:
+            pdf = report_generator.gerar_relatorio_alertas(df, mapa_anuidades)
+            st.download_button("📥 Baixar Relatório de Alertas", pdf, "relatorio_alertas.pdf", "application/pdf")
+        except Exception as exc:
+            st.error(f"Erro no relatório de alertas: {exc}")
 
     st.divider()
     st.download_button(
