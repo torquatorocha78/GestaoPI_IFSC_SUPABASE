@@ -33,6 +33,17 @@ except Exception as exc:
 # FUNÇÕES AUXILIARES
 # ============================================================
 
+def text_clean(valor):
+    """Converte valores vindos do Supabase/DataFrame em texto seguro para os widgets."""
+    if valor is None:
+        return ""
+    try:
+        if pd.isna(valor):
+            return ""
+    except Exception:
+        pass
+    return str(valor)
+
 def ano_clean(valor):
     """Retorna o ano como inteiro de forma segura, evitando erros com NaN/None."""
     if valor is None or pd.isna(valor) or str(valor).strip() == "":
@@ -1216,5 +1227,4 @@ elif pagina == "📑 Relatórios FORMICT":
 
     import formict_report
     formict_report.render()
-
 
