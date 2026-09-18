@@ -17,3 +17,10 @@ sentence-transformers
 pypdf
 xlrd
 openpyxl
+
+
+
+
+
+
+python-dateutil
