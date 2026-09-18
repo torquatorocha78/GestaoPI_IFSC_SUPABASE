@@ -402,6 +402,7 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
 
 
 def obter_anuidades(patente_id: Any) -> pd.DataFrame:
+    """Retorna o cronograma da PI mesclado com os pagamentos persistidos no Supabase."""
     df = obter_patentes()
     if df.empty:
         return pd.DataFrame()
@@ -415,13 +416,39 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
     if not data_dep:
         return pd.DataFrame()
 
-    pagamentos = _calcular_cronograma(data_dep, pi.get("modalidade_pi"))
-    for pagamento in pagamentos:
-        pagamento["patente_id"] = patente_id
-
-    resultado = pd.DataFrame(pagamentos)
+    resultado = pd.DataFrame(_calcular_cronograma(data_dep, pi.get("modalidade_pi")))
     if resultado.empty:
         return resultado
+    resultado["patente_id"] = patente_id
+
+    # Recupera os registros efetivamente gravados na tabela anuidades.
+    try:
+        persistidos = _request(
+            "GET",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=*&patente_id=eq.{quote(str(patente_id), safe='')}&order=numero_anuidade.asc",
+            headers=_headers(),
+        )
+    except Exception:
+        persistidos = []
+
+    if persistidos:
+        df_persistidos = pd.DataFrame(persistidos)
+        if "numero_anuidade" in df_persistidos.columns:
+            df_persistidos["numero_anuidade"] = pd.to_numeric(
+                df_persistidos["numero_anuidade"], errors="coerce"
+            )
+            resultado["numero_anuidade"] = pd.to_numeric(
+                resultado["numero_anuidade"], errors="coerce"
+            )
+            cols = [c for c in ["status", "data_pagamento"] if c in df_persistidos.columns]
+            if cols:
+                mapa = df_persistidos.set_index("numero_anuidade")[cols].to_dict("index")
+                for idx, row in resultado.iterrows():
+                    info = mapa.get(row["numero_anuidade"], {})
+                    if info.get("status"):
+                        resultado.at[idx, "status"] = info["status"]
+                    if info.get("data_pagamento"):
+                        resultado.at[idx, "data_pagamento"] = info["data_pagamento"]
 
     hoje = date.today()
 
@@ -447,28 +474,45 @@ def atualizar_status_anuidade(
     novo_status: str,
     data_pagamento: Optional[str] = None,
 ) -> None:
-    """Persiste o pagamento quando a tabela anuidades tiver as colunas usadas pelo app."""
-    payload = {
-        "patente_id": patente_id,
-        "numero_anuidade": numero_anuidade,
-        "status": novo_status,
-        "data_pagamento": _parse_data(data_pagamento),
-    }
+    """Atualiza ou cria o registro da anuidade sem depender de constraint UNIQUE."""
     try:
-        _request(
-            "POST",
-            f"{SUPABASE_URL}/rest/v1/anuidades?on_conflict=patente_id,numero_anuidade",
-            headers=_headers("resolution=merge-duplicates,return=minimal"),
-            json=payload,
+        filtro_id = quote(str(patente_id), safe="")
+        existente = _request(
+            "GET",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=id&patente_id=eq.{filtro_id}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
+            headers=_headers(),
         )
+
+        payload = {
+            "patente_id": patente_id,
+            "numero_anuidade": int(numero_anuidade),
+            "status": novo_status,
+            "data_pagamento": _parse_data(data_pagamento) if data_pagamento else None,
+        }
+
+        if existente:
+            registro_id = existente[0].get("id")
+            if registro_id is None:
+                raise RuntimeError("Registro de anuidade encontrado sem ID.")
+            _request(
+                "PATCH",
+                f"{SUPABASE_URL}/rest/v1/anuidades?id=eq.{quote(str(registro_id), safe='')}",
+                headers=_headers("return=minimal"),
+                json=payload,
+            )
+        else:
+            # Cria somente o registro selecionado, preservando o cronograma calculado pelo app.
+            _request(
+                "POST",
+                f"{SUPABASE_URL}/rest/v1/anuidades",
+                headers=_headers("return=minimal"),
+                json=payload,
+            )
     except Exception as exc:
         raise RuntimeError(
-            "Não foi possível salvar o status da anuidade no Supabase. "
-            "Verifique se a tabela anuidades criada no Supabase contém "
-            "patente_id, numero_anuidade, status e data_pagamento. "
+            "Não foi possível registrar o pagamento da anuidade no Supabase. "
             f"Detalhe: {exc}"
         ) from exc
-
 
 def deletar_patente(patente_id: Any) -> None:
     _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
