@@ -723,14 +723,6 @@ elif pagina == "📁 Gerenciar PIs":
                 f"{pi['descricao']}"
             )
 
-        colf1, colf2, colf3 = st.columns(3)
-        with colf1:
-            st.metric("🎯 TRL", pi.get("trl") or "Não informado")
-        with colf2:
-            st.metric("📅 Ano FORMICT", pi.get("formict_ano_base") or "Não informado")
-        with colf3:
-            st.metric("💰 Custo manutenção", pi.get("custo_manutencao_ano_base") if pi.get("custo_manutencao_ano_base") is not None else "Não informado")
-
         if pi.get("inventores_cpf"):
             st.info(f"**CPF dos Inventores:** {pi['inventores_cpf']}")
 
@@ -856,12 +848,6 @@ elif pagina == "📁 Gerenciar PIs":
 
                     st.markdown("### 📑 Dados complementares FORMICT")
 
-                    edit_trl = st.text_input(
-                        "TRL",
-                        value=text_clean(pi.get("trl")),
-                        help="Nível de maturidade tecnológica informado no FORMICT.",
-                    )
-
                     edit_inventores_cpf = st.text_area(
                         "CPF dos Inventores",
                         value=text_clean(pi.get("inventores_cpf")),
@@ -941,7 +927,6 @@ elif pagina == "📁 Gerenciar PIs":
                             "termo_cessao"
                         ),
                         ipc_classificacao=edit_ipc,
-                        trl=edit_trl,
                         inventores_cpf=edit_inventores_cpf,
                         observacoes_formict=edit_observacoes_formict,
                     )
@@ -1057,13 +1042,14 @@ elif pagina == "📁 Gerenciar PIs":
 
                 data_pagamento = st.date_input(
                     "Data do Pagamento",
-                    key="data_pag"
+                    key=f"data_pag_{pi_id}"
                 )
 
             with col3:
 
                 if st.button(
                     "✅ Registrar Pagamento",
+                    key=f"registrar_pagamento_{pi_id}",
                     use_container_width=True
                 ):
 
@@ -1095,6 +1081,7 @@ elif pagina == "📁 Gerenciar PIs":
 
                 if st.button(
                     "🚫 Marcar Não Pagar",
+                    key=f"nao_pagar_{pi_id}",
                     use_container_width=True
                 ):
 
@@ -1160,12 +1147,6 @@ elif pagina == "📤 Importar Excel":
         A planilha de importação deve usar a estrutura do sistema.
 
         **Campos obrigatórios:** `Processo` e `Depósito`.
-
-        No FORMICT, **Número do Pedido (Protocolo INPI) = Processo**
-        e **Data de registro do ativo = Depósito**.
-
-        Os campos novos do FORMICT (CPF dos inventores, TRL e demais
-        informações) são preservados no cadastro e no módulo Relatórios FORMICT.
         """
     )
 
