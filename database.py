@@ -234,25 +234,37 @@ def _patente_url(patente_id: Any) -> str:
 
 
 def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
+    """Monta payload usando EXATAMENTE as colunas da tabela public.patentes.
+
+    Importante: não usar nomes de outra arquitetura (pedido, resumo,
+    depositante_titular, nome_inventores), pois a tabela oficial do sistema
+    usa numero_patente, descricao, titular e inventores.
+    """
     payload = {
-        "pedido": dados.get("numero") or dados.get("numero_patente"),
+        "numero_patente": dados.get("numero") or dados.get("numero_patente"),
         "data_deposito": _parse_data(dados.get("data_dep") or dados.get("data_deposito")),
         "data_concessao": _parse_data(dados.get("data_conc") or dados.get("data_concessao")),
-        "resumo": dados.get("descricao") or dados.get("resumo"),
-        "depositante_titular": dados.get("titular") or dados.get("depositante_titular"),
+        "descricao": dados.get("descricao") or dados.get("resumo"),
+        "titular": dados.get("titular") or dados.get("depositante_titular"),
         "gestor": dados.get("gestor"),
         "status": _normalizar_status(dados.get("status_patente") or dados.get("status")),
         "titulo": dados.get("titulo"),
-        "nome_inventores": dados.get("inventores") or dados.get("nome_inventores"),
+        "inventores": dados.get("inventores") or dados.get("nome_inventores"),
+        "campus": dados.get("campus"),
+        "atributos": dados.get("atributos"),
+        "id_externo": dados.get("id_externo"),
         "modalidade_pi": normalizar_modalidade(dados.get("modalidade_pi")),
         "ano": dados.get("ano"),
         "data_publicacao": _parse_data(dados.get("data_publicacao")),
         "data_exame": _parse_data(dados.get("data_exame")),
         "acordo_titularidade": dados.get("acordo_titularidade"),
+        "procuracao": dados.get("procuracao"),
+        "termo_cessao": dados.get("termo_cessao"),
         "ipc_classificacao": dados.get("ipc_classificacao"),
         "linguagem": dados.get("linguagem"),
         "campo_aplicacao": dados.get("campo_aplicacao"),
         "tipo_programa": dados.get("tipo_programa"),
+        # Novos campos FORMICT
         "inventores_cpf": dados.get("inventores_cpf"),
         "trl": dados.get("trl"),
         "observacoes_formict": dados.get("observacoes_formict"),
@@ -268,8 +280,7 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
         "data_manutencao": _parse_data(dados.get("data_manutencao")),
         "formict_ano_base": dados.get("formict_ano_base"),
     }
-    return {chave: _valor_limpo(valor) for chave, valor in payload.items() if valor is not None}
-
+    return {chave: _valor_limpo(valor) for chave, valor in payload.items() if _valor_limpo(valor) is not None}
 
 def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, Any]]:
     inicio = pd.to_datetime(data_dep)
@@ -361,7 +372,7 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
         numero = quote(str(dados["numero"]), safe="")
         existente = _request(
             "GET",
-            f"{_endpoint()}?select=*&pedido=eq.{numero}&limit=1",
+            f"{_endpoint()}?select=*&numero_patente=eq.{numero}&limit=1",
             headers=_headers(),
         )
         payload = _payload_patente(dados)
