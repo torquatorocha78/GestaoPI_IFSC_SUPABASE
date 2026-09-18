@@ -19,8 +19,6 @@ Requer:
 import io
 import json
 import re
-from datetime import date
-
 import pandas as pd
 import streamlit as st
 from reportlab.lib import colors
@@ -257,54 +255,6 @@ def exportar_pdf(df, ano_base=None):
     return output.getvalue()
 
 
-def _alertas_anuidades(df):
-    alertas = []
-    hoje = date.today()
-
-    if df is None or df.empty:
-        return alertas
-
-    for _, pi in df.iterrows():
-        try:
-            anu = db.obter_anuidades(pi.get("id"))
-        except Exception:
-            continue
-
-        if anu is None or anu.empty:
-            continue
-
-        for _, a in anu.iterrows():
-            if _txt(a.get("status")).lower() == "nao_pagar":
-                continue
-            if _txt(a.get("data_pagamento")):
-                continue
-
-            fim = _date(a.get("data_fim_ordinario"))
-            if not fim:
-                continue
-
-            dias = (fim - hoje).days
-            if dias < 0:
-                nivel = "VENCIDO"
-            elif dias <= 30:
-                nivel = "URGENTE"
-            elif dias <= 60:
-                nivel = "ATENÇÃO"
-            else:
-                continue
-
-            alertas.append({
-                "Nível": nivel,
-                "Processo": _txt(pi.get("numero_patente")),
-                "Título": _txt(pi.get("titulo")),
-                "Anuidade": a.get("numero_anuidade"),
-                "Vencimento": fim.strftime("%d/%m/%Y"),
-                "Dias restantes": dias,
-            })
-
-    return sorted(alertas, key=lambda x: x["Dias restantes"])
-
-
 def render():
     st.title("📑 Relatórios FORMICT")
     st.caption(
@@ -375,14 +325,6 @@ def render():
     st.subheader("📋 Ativos do FORMICT")
     tabela = _linhas_exportacao(rel)
     st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.subheader("🚨 Alertas urgentes de manutenção")
-    alertas = _alertas_anuidades(rel)
-    if alertas:
-        st.dataframe(pd.DataFrame(alertas), use_container_width=True, hide_index=True)
-    else:
-        st.success("Nenhum alerta de anuidade vencida ou nos próximos 30 dias.")
 
     st.divider()
     b1, b2 = st.columns(2)
