@@ -614,3 +614,130 @@ def analisar_inconsistencias_excel(arquivo_excel) -> List[str]:
     if not any(c in colunas for c in ["modalidade_de_pi", "modalidade_pi", "modalidade", "tipo"]):
         problemas.append("Coluna 'Modalidade de PI' não encontrada; os registros serão tratados como Patente.")
     return problemas
+
+# ============================================================
+# ASSISTENTE JURÍDICO NIT
+# Persistência do histórico e contexto institucional
+# ============================================================
+
+def registrar_consulta_juridica(
+    pergunta: str,
+    resposta: str,
+    documento_nome: Optional[str] = None,
+    paginas: Optional[str] = None,
+    fontes: Optional[List[Dict[str, Any]]] = None,
+    ativo_pi_id: Any = None,
+    modelo: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Registra uma consulta jurídica na tabela public.assistente_juridico.
+
+    Estrutura utilizada pela aplicação:
+      pergunta, resposta, documento_nome, paginas, fontes,
+      ativo_pi_id e modelo.
+
+    O campo created_at é deixado para o DEFAULT do PostgreSQL/Supabase.
+    """
+    try:
+        payload = {
+            "pergunta": _valor_limpo(pergunta),
+            "resposta": _valor_limpo(resposta),
+            "documento_nome": _valor_limpo(documento_nome),
+            "paginas": _valor_limpo(paginas),
+            "fontes": fontes if fontes else [],
+            "ativo_pi_id": _valor_limpo(ativo_pi_id),
+            "modelo": _valor_limpo(modelo),
+        }
+
+        payload = {
+            chave: valor
+            for chave, valor in payload.items()
+            if valor is not None
+        }
+
+        _request(
+            "POST",
+            _endpoint("assistente_juridico"),
+            headers=_headers("return=minimal"),
+            json=payload,
+        )
+        return True, "Consulta jurídica salva no histórico do Supabase."
+    except Exception as exc:
+        return False, f"Erro ao salvar consulta jurídica: {exc}"
+
+
+def obter_historico_consultas_juridicas(
+    limite: int = 50,
+) -> pd.DataFrame:
+    """Retorna as consultas jurídicas mais recentes."""
+    try:
+        try:
+            limite = int(limite)
+        except Exception:
+            limite = 50
+        limite = max(1, min(limite, 500))
+
+        data = _request(
+            "GET",
+            f"{_endpoint('assistente_juridico')}?select=*&order=created_at.desc&limit={limite}",
+            headers=_headers(),
+        )
+        return pd.DataFrame(data or [])
+    except Exception as exc:
+        raise RuntimeError(
+            f"Não foi possível consultar o histórico jurídico: {exc}"
+        ) from exc
+
+
+def excluir_consulta_juridica(consulta_id: Any) -> Tuple[bool, str]:
+    """Exclui uma consulta específica do histórico jurídico."""
+    try:
+        if consulta_id is None or str(consulta_id).strip() == "":
+            return False, "ID da consulta jurídica não informado."
+
+        filtro = quote(str(consulta_id), safe="")
+        _request(
+            "DELETE",
+            f"{_endpoint('assistente_juridico')}?id=eq.{filtro}",
+            headers=_headers("return=minimal"),
+        )
+        return True, "Consulta jurídica excluída com sucesso."
+    except Exception as exc:
+        return False, f"Erro ao excluir consulta jurídica: {exc}"
+
+
+def buscar_contexto_ativo_pi(ativo_pi_id: Any = None) -> pd.DataFrame:
+    """Busca uma PI específica na tabela oficial public.patentes."""
+    if ativo_pi_id is None or str(ativo_pi_id).strip() == "":
+        return pd.DataFrame()
+
+    try:
+        filtro = quote(str(ativo_pi_id), safe="")
+        data = _request(
+            "GET",
+            f"{_endpoint('patentes')}?select=*&id=eq.{filtro}&limit=1",
+            headers=_headers(),
+        )
+        return _preparar_patentes(pd.DataFrame(data or []))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Não foi possível carregar o contexto da PI: {exc}"
+        ) from exc
+
+
+def obter_obrigacoes_ativo(ativo_id: Any = None) -> pd.DataFrame:
+    """Busca as obrigações/anuidades vinculadas a uma PI."""
+    if ativo_id is None or str(ativo_id).strip() == "":
+        return pd.DataFrame()
+
+    try:
+        filtro = quote(str(ativo_id), safe="")
+        data = _request(
+            "GET",
+            f"{_endpoint('anuidades')}?select=*&patente_id=eq.{filtro}&order=numero_anuidade.asc",
+            headers=_headers(),
+        )
+        return pd.DataFrame(data or [])
+    except Exception as exc:
+        raise RuntimeError(
+            f"Não foi possível carregar as obrigações da PI: {exc}"
+        ) from exc
