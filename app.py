@@ -4,6 +4,7 @@ from datetime import datetime
 
 import database as db
 import utils
+import assistente_juridico_NIT
 
 
 # ============================================================
@@ -284,6 +285,7 @@ pagina = st.sidebar.radio(
         "➕ Adicionar PI",
         "📁 Gerenciar PIs",
         "📤 Importar Excel",
+        "⚖️ Assistente Jurídico NIT",
         "📑 Relatórios FORMICT",
     ],
 )
@@ -1142,14 +1144,6 @@ elif pagina == "📤 Importar Excel":
 
     st.title("📥 Importar PIs via Excel")
 
-    st.markdown(
-        """
-        A planilha de importação deve usar a estrutura do sistema.
-
-        **Campos obrigatórios:** `Processo` e `Depósito`.
-        """
-    )
-
     arquivo_excel = st.file_uploader(
         "Selecione a planilha (.xls ou .xlsx)",
         type=["xls", "xlsx"],
@@ -1198,6 +1192,15 @@ elif pagina == "📤 Importar Excel":
                     )
         except Exception as exc:
             st.error(f"❌ Erro ao processar a planilha: {exc}")
+
+
+# ============================================================
+# ASSISTENTE JURÍDICO NIT
+# ============================================================
+
+elif pagina == "⚖️ Assistente Jurídico NIT":
+
+    assistente_juridico_NIT.render_assistente_juridico()
 
 
 # ============================================================
