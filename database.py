@@ -629,7 +629,7 @@ def registrar_consulta_juridica(
     ativo_pi_id: Any = None,
     modelo: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Registra uma consulta jurídica na tabela public.assistente_juridico.
+    """Registra uma consulta jurídica na tabela public.historico_consultas_juridicas.
 
     Estrutura utilizada pela aplicação:
       pergunta, resposta, documento_nome, paginas, fontes,
@@ -656,7 +656,7 @@ def registrar_consulta_juridica(
 
         _request(
             "POST",
-            _endpoint("assistente_juridico"),
+            _endpoint("historico_consultas_juridicas"),
             headers=_headers("return=minimal"),
             json=payload,
         )
@@ -678,7 +678,7 @@ def obter_historico_consultas_juridicas(
 
         data = _request(
             "GET",
-            f"{_endpoint('assistente_juridico')}?select=*&order=created_at.desc&limit={limite}",
+            f"{_endpoint('historico_consultas_juridicas')}?select=*&order=created_at.desc&limit={limite}",
             headers=_headers(),
         )
         return pd.DataFrame(data or [])
@@ -697,7 +697,7 @@ def excluir_consulta_juridica(consulta_id: Any) -> Tuple[bool, str]:
         filtro = quote(str(consulta_id), safe="")
         _request(
             "DELETE",
-            f"{_endpoint('assistente_juridico')}?id=eq.{filtro}",
+            f"{_endpoint('historico_consultas_juridicas')}?id=eq.{filtro}",
             headers=_headers("return=minimal"),
         )
         return True, "Consulta jurídica excluída com sucesso."
